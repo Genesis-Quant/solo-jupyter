@@ -1,5 +1,9 @@
 # Jupyter
 
+Solo 本地部署使用父目录的 `docker-compose.yml`，在父目录执行 `docker compose up -d --build --wait`。共享工作区为 `/shared/projects`，运行结果为 `/shared/runs`；凭据库使用命名卷，密钥位于父目录 `.secrets/jupyter-keyring-password`。代理为可选配置，不依赖 nj 的外部网络。具体配置见父目录 README。
+
+以下说明保留本目录独立 Compose 的 nj 部署方式；Solo 本地部署不使用这份独立 Compose。
+
 项目目录：`/home/ubuntu/docker-compose/jupyter`。
 
 - 容器名称：`jupyter`；宿主机仅发布 `127.0.0.1:8888`，映射至容器端口 `8888`。

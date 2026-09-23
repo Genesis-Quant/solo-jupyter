@@ -1,10 +1,11 @@
+ARG NOTEBOOK_IMAGE=quay.io/jupyter/scipy-notebook:latest
 FROM node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS codex-runtime
 
 WORKDIR /opt/jupyter-codex
 COPY codex/package.json codex/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
-FROM quay.io/jupyter/scipy-notebook:latest
+FROM ${NOTEBOOK_IMAGE}
 
 USER root
 
@@ -36,8 +37,8 @@ COPY --from=codex-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=codex-runtime /opt/jupyter-codex /opt/jupyter-codex
 
 USER root
-RUN ln -s /opt/jupyter-codex/node_modules/.bin/codex /usr/local/bin/codex \
-    && ln -s /opt/jupyter-codex/node_modules/.bin/codex-acp /usr/local/bin/codex-acp \
+RUN ln -sf /opt/jupyter-codex/node_modules/.bin/codex /usr/local/bin/codex \
+    && ln -sf /opt/jupyter-codex/node_modules/.bin/codex-acp /usr/local/bin/codex-acp \
     && install -d -o "${NB_UID}" -g "${NB_GID}" -m 700 "/home/${NB_USER}/.codex"
 
 USER ${NB_UID}
