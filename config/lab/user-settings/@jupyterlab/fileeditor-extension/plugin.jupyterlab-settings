@@ -1,0 +1,43 @@
+{
+    // 文本编辑器
+    // @jupyterlab/fileeditor-extension:plugin
+    // 文本编辑器设置。
+    // ***************************************
+
+    // 编辑器配置
+    // 所有文本编辑器的配置；它将覆盖CodeMirror默认配置。
+    // 如果`fontFamily`，`fontSize`或者 `lineHeight`为 `null`,
+    // 则使用当前主题的值。
+    "editorConfig": {
+        "customStyles": {
+            "fontFamily": null,
+            "fontSize": 13,
+            "lineHeight": null
+        }
+    },
+
+    // 滚动行为
+    // 是否滚动超过文本文档的末端.
+    "scrollPastEnd": true,
+
+    // 文本编辑器工具栏项目
+    // 注意：想要禁用一个工具栏项目，复制它到用户选项并添加「disabled」键。工具栏描述：
+    "toolbar": [
+        {
+            "name": "create-console",
+            "command": "fileeditor:create-console",
+            "args": { "activate": false },
+            "label": "创建控制台",
+            "caption": "首次运行此文件时，创建控制台并选择 Python 内核",
+            "rank": 10
+        },
+        {
+            "name": "run-all-code",
+            "command": "fileeditor:run-all",
+            "icon": "ui-components:run",
+            "label": "运行整个文件",
+            "caption": "在关联的控制台中运行编辑器里的全部代码",
+            "rank": 20
+        }
+    ]
+}

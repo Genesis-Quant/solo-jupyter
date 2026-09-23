@@ -1,0 +1,24 @@
+{
+  "FileContentsManager": {
+    "always_delete_dir": true,
+    "hide_globs": [
+      "__pycache__",
+      "*.pyc",
+      "*.pyo",
+      ".DS_Store",
+      "*~",
+      ".ipynb_checkpoints",
+      ".git",
+      "venv",
+      ".pytest_cache",
+      ".mypy_cache",
+      "*.egg-info"
+    ]
+  },
+  "PersonaManager": {
+    "default_persona_id": "jupyter-ai-personas::jupyter_ai_acp_client::CodexAcpPersona"
+  },
+  "ResourceUseDisplay": {
+    "track_cpu_percent": true
+  }
+}

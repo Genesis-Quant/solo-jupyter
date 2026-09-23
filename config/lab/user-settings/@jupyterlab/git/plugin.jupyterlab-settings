@@ -1,0 +1,10 @@
+{
+    // Git
+    // @jupyterlab/git:plugin
+    // jupyterlab-git settings.
+    // ************************
+
+    // Clear outputs before commit
+    // If true, notebook outputs will be cleared before committing. If false, outputs are kept. If null, ask each time.
+    "clearOutputsBeforeCommit": true
+}

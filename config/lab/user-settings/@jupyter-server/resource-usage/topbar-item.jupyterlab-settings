@@ -1,0 +1,13 @@
+{
+    "enable": true,
+    "refreshRate": 5000,
+    "memory": {
+        "label": "| Mem: "
+    },
+    "cpu": {
+        "label": "CPU: "
+    },
+    "disk": {
+        "label": "| Disk: "
+    }
+}

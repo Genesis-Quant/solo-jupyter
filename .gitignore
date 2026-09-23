@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+data/
+keyring-data/
+secrets/
+config/lab/workspaces/
+config/dolphindb-extension/
+config/migrated
+__pycache__/
+*.py[cod]
+node_modules/

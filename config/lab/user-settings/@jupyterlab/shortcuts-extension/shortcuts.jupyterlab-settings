@@ -1,0 +1,14 @@
+{
+  "shortcuts": [
+    {
+      "command": "jupyter-ruff:format-all-cells",
+      "keys": ["Ctrl Alt L"],
+      "selector": ".jp-Notebook"
+    },
+    {
+      "command": "jupyter-ruff:format-editor",
+      "keys": ["Ctrl Alt L"],
+      "selector": ".jp-FileEditor"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+    // 文件浏览器
+    // @jupyterlab/filebrowser-extension:browser
+    // 文件浏览器设置。
+    // *****************************************
+
+    // 显示隐藏文件
+    // 是否显示隐藏文件。服务器参数 `ContentsManager.allow_hidden` 必须设置为 `True` 以显示隐藏文件。
+    "showHiddenFiles": true
+}

@@ -1,0 +1,4 @@
+# Published JupyterLab extension with Notebook magic support.
+dolphindb-extension[notebook]==0.1.0b3
+dolphindb==3.0.6.0
+future==1.0.0

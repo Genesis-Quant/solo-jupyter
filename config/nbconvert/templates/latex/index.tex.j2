@@ -1,0 +1,12 @@
+((* set cell_style = cell_style | default('style_jupyter.tex.j2') *))
+((* extends cell_style *))
+
+((* block packages *))
+((( super() )))
+
+% Chinese fonts for notebook text, headings, code comments, and text output.
+\usepackage{xeCJK}
+\setCJKmainfont[AutoFakeSlant=true]{Noto Serif CJK SC}
+\setCJKsansfont[AutoFakeSlant=true]{Noto Sans CJK SC}
+\setCJKmonofont[AutoFakeSlant=true]{Noto Sans Mono CJK SC}
+((* endblock packages *))
