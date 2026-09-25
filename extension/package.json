@@ -1,0 +1,39 @@
+{
+  "name": "@solo/jupyter-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Solo project integration for JupyterLab",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "style",
+    "labextension"
+  ],
+  "scripts": {
+    "build": "tsc && jupyter-builder build .",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@jupyter/react-components": "^0.16.7",
+    "@jupyterlab/application": "~4.6.3",
+    "@jupyterlab/apputils": "~4.7.3",
+    "@jupyterlab/coreutils": "~6.6.3",
+    "@jupyterlab/docmanager": "~4.6.3",
+    "@jupyterlab/filebrowser": "~4.6.3",
+    "@jupyterlab/services": "~7.6.3",
+    "@jupyterlab/ui-components": "~4.6.3",
+    "@lumino/coreutils": "^2.2.2",
+    "@lumino/signaling": "^2.1.5",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@jupyterlab/builder": "~4.5.11",
+    "@types/react": "^18.2.0",
+    "typescript": "~5.8.3"
+  },
+  "jupyterlab": {
+    "extension": true,
+    "outputDir": "labextension"
+  }
+}

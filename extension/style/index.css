@@ -1,0 +1,103 @@
+/* 仅排版，控件外观与明暗主题由 Jupyter 组件提供。 */
+.solo-project-details {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 12px;
+  overflow: auto;
+}
+
+.solo-project-details jp-select {
+  display: block;
+  margin: 0 0 12px;
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+}
+
+.solo-project-details jp-select::part(selected-value) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.solo-project-metadata {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 12px;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.solo-project-metadata dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.solo-project-message {
+  margin: 0;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.solo-project-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+  margin-top: 12px;
+}
+.solo-parameters-dialog .jp-Dialog-content {
+  width: 760px;
+  max-width: calc(100vw - 40px);
+  max-height: calc(100vh - 40px);
+}
+
+.solo-parameters-dialog .jp-Dialog-body {
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 2px;
+}
+
+.solo-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 20px;
+  align-items: start;
+  padding: 0;
+  border: 0;
+}
+
+.solo-parameter-grid > * {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0;
+}
+
+.solo-version-note {
+  display: block;
+  margin-top: 16px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.solo-select-field label {
+  display: block;
+  font-size: var(--jp-ui-font-size1);
+  line-height: 20px;
+  margin-bottom: 4px;
+}
+
+.solo-select-field jp-select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+@media (max-width: 600px) {
+  .solo-parameter-grid { grid-template-columns: minmax(0, 1fr); }
+}

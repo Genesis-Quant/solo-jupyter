@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "solo-jupyter"
+version = "0.1.0"
+description = "Solo project integration for JupyterLab"
+requires-python = ">=3.12"
+dependencies = ["jupyterlab>=4.6,<5", "jupyter-server>=2,<3", "packaging>=24", "tomlkit>=0.13,<1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["solo_jupyter"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"labextension" = "share/jupyter/labextensions/@solo/jupyter-extension"
+"jupyter-config" = "etc/jupyter"
+
+[tool.hatch.build.targets.sdist]
+include = ["solo_jupyter", "labextension", "jupyter-config", "pyproject.toml"]

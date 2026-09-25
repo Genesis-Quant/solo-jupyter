@@ -8,6 +8,12 @@ config/lab/workspaces/
 config/dolphindb-extension/
 config/migrated
 config/serverconfig/
+config/kernels/
 __pycache__/
 *.py[cod]
 node_modules/
+extension/lib/
+extension/labextension/
+extension/dist/
+extension/*.tsbuildinfo
+config/jupyter_server_config.py

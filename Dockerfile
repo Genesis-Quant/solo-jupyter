@@ -5,6 +5,19 @@ WORKDIR /opt/jupyter-codex
 COPY codex/package.json codex/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
+FROM ${NOTEBOOK_IMAGE} AS solo-extension
+USER root
+COPY --from=codex-runtime /usr/local/bin/node /usr/local/bin/node
+COPY --from=codex-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
+RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
+ENV PATH="/usr/local/bin:${PATH}"
+WORKDIR /opt/solo-extension
+COPY extension/package.json extension/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY extension/ ./
+RUN npm run build -- --core-package-file "$(python -c 'from pathlib import Path; import jupyterlab; print(Path(jupyterlab.__file__).parent / "staging" / "package.json")')" \
+    && python -m pip wheel --no-cache-dir --no-deps --wheel-dir /tmp/solo-wheel .
+
 FROM ${NOTEBOOK_IMAGE}
 
 USER root
@@ -82,4 +95,9 @@ RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: jupyterla
     && python -m pip check
 
 RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: lckr-jupyterlab-variableinspector==3.2.4 \
+    && python -m pip check
+
+COPY --from=solo-extension /tmp/solo-wheel /tmp/solo-wheel
+RUN python -m pip install --no-cache-dir 'tomlkit>=0.13,<1' \
+    && python -m pip install --no-cache-dir --no-deps /tmp/solo-wheel/*.whl \
     && python -m pip check

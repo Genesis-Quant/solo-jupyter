@@ -2,6 +2,43 @@
 
 Solo 本地部署使用父目录的 `docker-compose.yml`，在父目录执行 `docker compose up -d --build --wait`。共享工作区为 `/shared/projects`，运行结果为 `/shared/runs`；凭据库使用命名卷，密钥位于父目录 `.secrets/jupyter-keyring-password`。代理为可选配置，不依赖 nj 的外部网络。具体配置见父目录 README。
 
+## Solo 插件
+
+源码在 `extension/`，包含 JupyterLab 预构建扩展和 Jupyter Server 扩展，随本目录镜像安装。
+左侧 Solo 面板跟随当前文件或文件浏览器目录，向上查找项目根目录的 `.solo`，显示项目类型及 Scheme / Algo 版本。
+工具栏提供刷新、打开项目目录和打开 `research.ipynb`；命令面板的 Solo 分类还可打开 `pyproject.toml`。
+非项目目录显示空状态，错误在面板内显示，打开项目不弹出流程对话框。
+
+界面使用 Jupyter 的 `SidePanel`、`CommandToolbarButton`、`Select` 和 `Button`，只读项目信息与状态提示使用普通文本；
+主题、图标、命令与文件打开均使用 Jupyter 原生能力。CSS 只设置间距和滚动。
+服务端提供需登录的 `GET <base_url>/solo/project?path=<相对路径>`，读取项目描述，不开放隐藏文件通用读取。
+
+“安装已有项目”从 Solo 后端读取未归档项目，仅列出当前类型及其上游类型、且 Scheme 大版本相同的其他项目。
+类型顺序为 factor → model → optimize → control → execution；同类项目可以相互选择，自身不能安装。
+点击安装会执行 `uv add --no-workspace --upgrade-package <包名> --reinstall-package <包名> <项目目录>`，将对方当前已保存的源码构建安装到当前项目的 `.venv`，同步更新 `pyproject.toml` 和 `uv.lock`。
+安装的是本地项目包，不是已发布版本，也不是 editable 安装；源码修改后可再次点击安装更新。
+已被 Kernel 导入的包需要重启 Kernel 才能加载新代码。项目改名导致路径变化时，需重新选择安装。
+插件通过 `SOLO_BACKEND_URL`（默认 `http://backend:8000`）连接后端，列表与安装接口为 `GET/POST <base_url>/solo/project/dependencies`。
+
+后续提交和上游管理插件通过 `IProjectContext` token 获取当前项目、监听 `changed` 或调用 `refresh()`。
+因子项目支持填写研究参数后保存版本。构建中断时可点击“取消构建”解除保存锁定；
+调度服务明确未接收任务时可点击“重试提交”，复用该版本的构建产物。
+提交响应丢失时通过“核实提交”查找已有任务，不重复提交工作流。发布接口尚未接入。
+
+开发环境需要 Node.js、npm、Python 及 `jupyterlab>=4.6,<5`，在 `extension/` 执行：
+
+```bash
+npm ci
+npm run build
+python -m pip install --no-deps .
+jupyter labextension list
+jupyter server extension list
+```
+
+首次安装后重启 Jupyter Server、刷新页面。前端改动需重新构建、安装并刷新页面。
+生产镜像会从源码构建，不依赖本地 `node_modules` 或构建产物。
+结构遵循 [JupyterLab 预构建扩展](https://jupyterlab.readthedocs.io/en/stable/extension/extension_dev.html)的组织方式。
+
 以下说明保留本目录独立 Compose 的 nj 部署方式；Solo 本地部署不使用这份独立 Compose。
 
 项目目录：`/home/ubuntu/docker-compose/jupyter`。
