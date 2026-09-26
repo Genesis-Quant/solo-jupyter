@@ -1,4 +1,4 @@
-import { Button, Option, Select } from '@jupyter/react-components';
+import { Button, Checkbox, Option, Select } from '@jupyter/react-components';
 import { ReactWidget } from '@jupyterlab/apputils';
 import { URLExt } from '@jupyterlab/coreutils';
 import { ServerConnection } from '@jupyterlab/services';
@@ -14,14 +14,14 @@ interface Candidate {
   schemeVersion: string;
 }
 
-async function request<T>(path: string, projectId?: string): Promise<T> {
+async function request<T>(path: string, projectId?: string, dev = true): Promise<T> {
   const settings = ServerConnection.makeSettings();
   const url = URLExt.join(settings.baseUrl, 'solo', 'project', 'dependencies');
   const response = await ServerConnection.makeRequest(
     projectId ? url : `${url}?${new URLSearchParams({ path })}`,
     projectId ? {
       method: 'POST',
-      body: JSON.stringify({ path, project_id: projectId }),
+      body: JSON.stringify({ path, project_id: projectId, dev }),
       headers: { 'Content-Type': 'application/json' }
     } : {},
     settings
@@ -41,6 +41,7 @@ function Installer({ project }: { project: Project }): React.ReactElement {
   const [selected, setSelected] = useState('');
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
+  const [dev, setDev] = useState(true);
   const [message, setMessage] = useState('');
   const [refresh, setRefresh] = useState(0);
 
@@ -67,8 +68,8 @@ function Installer({ project }: { project: Project }): React.ReactElement {
     setInstalling(true);
     setMessage('正在使用 uv 安装…');
     try {
-      const result = await request<{ package: string }>(project.path, selected);
-      setMessage(`已安装 ${result.package}。已加载该包的 Kernel 需重启后使用新代码。`);
+      const result = await request<{ package: string }>(project.path, selected, dev);
+      setMessage(`已将 ${result.package} 安装为${dev ? '研究依赖（dev）' : '运行依赖'}。已加载该包的 Kernel 需重启后使用新代码。`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -86,6 +87,10 @@ function Installer({ project }: { project: Project }): React.ReactElement {
         </Option>
       ) : <Option value="">{loading ? '正在读取项目…' : '没有兼容的同类或上游项目'}</Option>}
     </Select>
+    <Checkbox checked={dev} disabled={installing}
+      onChange={(event) => setDev((event.target as HTMLInputElement).checked)}>
+      仅用于研究（dev，不随算法包安装）
+    </Checkbox>
     <div className="solo-project-actions">
       <Button appearance="accent" disabled={loading || installing || !selected} onClick={() => void install()}>
         {installing ? '安装中…' : '安装项目'}

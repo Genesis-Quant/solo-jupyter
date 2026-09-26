@@ -9,6 +9,7 @@ from typing import Any
 
 from jupyter_server.base.handlers import APIHandler
 from packaging.utils import canonicalize_name
+from packaging.requirements import Requirement
 from packaging.version import InvalidVersion, Version
 from tornado import web
 from tornado.httpclient import AsyncHTTPClient, HTTPClientError
@@ -51,7 +52,7 @@ def project_package(root: Path, project: dict[str, Any]) -> tuple[Path, str]:
         raise web.HTTPError(422, reason="项目缺少有效的 Python 包配置") from error
 
 
-async def install_project(root: Path, current: dict[str, Any], candidate: dict[str, Any]) -> str:
+async def install_project(root: Path, current: dict[str, Any], candidate: dict[str, Any], *, dev: bool = True) -> str:
     if not compatible(current, candidate):
         raise web.HTTPError(422, reason="仅可安装同 Scheme 大版本的同类或上游项目")
     source = read_project(root, candidate["directory"])
@@ -84,20 +85,30 @@ async def install_project(root: Path, current: dict[str, Any], candidate: dict[s
             "UV_LINK_MODE": "copy",
             "GIT_TERMINAL_PROMPT": "0",
         }
-        process = await asyncio.create_subprocess_exec(
-            "uv", "add", "--project", str(directory), "--no-workspace",
-            "--upgrade-package", package, "--reinstall-package", package,
-            "--", str(source_directory),
-            cwd=directory, env=env,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        )
-        output, _ = await asyncio.wait_for(process.communicate(), timeout=600)
-        if process.returncode:
-            message = output.decode(errors="replace")[-3000:]
-            for key, value in os.environ.items():
-                if value and any(part in key.upper() for part in ("TOKEN", "PASSWORD", "SECRET")):
-                    message = message.replace(value, "[REDACTED]")
-            raise web.HTTPError(422, reason="uv 安装失败：\n" + message)
+        config = tomllib.loads((directory / "pyproject.toml").read_text())
+        previous = (config["project"].get("dependencies", []) if dev
+                    else config.get("dependency-groups", {}).get("dev", []))
+        commands = []
+        if any(isinstance(item, str) and canonicalize_name(Requirement(item).name) == package for item in previous):
+            # 移动分组时只改配置，安装成功前保留现有环境。
+            commands.append(["uv", "remove", "--project", str(directory), "--frozen",
+                             *([] if dev else ["--dev"]), package])
+        commands.append(["uv", "add", "--project", str(directory), "--no-workspace",
+                         *(["--dev"] if dev else []),
+                         "--upgrade-package", package, "--reinstall-package", package,
+                         "--", str(source_directory)])
+        for arguments in commands:
+            process = await asyncio.create_subprocess_exec(
+                *arguments, cwd=directory, env=env,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            )
+            output, _ = await asyncio.wait_for(process.communicate(), timeout=600)
+            if process.returncode:
+                message = output.decode(errors="replace")[-3000:]
+                for key, value in os.environ.items():
+                    if value and any(part in key.upper() for part in ("TOKEN", "PASSWORD", "SECRET")):
+                        message = message.replace(value, "[REDACTED]")
+                raise web.HTTPError(422, reason="uv 安装失败：\n" + message)
         return package
     except BaseException as error:
         if process is not None and process.returncode is None:
@@ -133,9 +144,11 @@ class DependenciesHandler(APIHandler):
         body = self.get_json_body()
         if not isinstance(body, dict) or not isinstance(body.get("path"), str) or not isinstance(body.get("project_id"), str):
             raise web.HTTPError(400, reason="缺少当前项目路径或待安装项目 ID")
+        if not isinstance(body.get("dev", True), bool):
+            raise web.HTTPError(400, reason="dev 必须为布尔值")
         current = self.current_project(body["path"])
         candidate = next((project for project in await project_catalog() if project["id"] == body["project_id"]), None)
         if candidate is None:
             raise web.HTTPError(404, reason="待安装项目不存在或已归档")
-        package = await install_project(Path(self.settings["server_root_dir"]).resolve(), current, candidate)
-        self.finish({"package": package})
+        package = await install_project(Path(self.settings["server_root_dir"]).resolve(), current, candidate, dev=body.get("dev", True))
+        self.finish({"package": package, "dev": body.get("dev", True)})

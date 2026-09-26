@@ -129,8 +129,14 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
         sources["scheme"] = {"path": str(destination)}
     environment = target / "environment"
     environment.mkdir()
+    # 研究任务显式安装选中的 Algo；不要求当前交付 wheel 依赖上游研究包。
+    research_dependencies = [f"{package}=={version['packageVersion']}"]
+    research_dependencies.extend(
+        f"{upstream['package']}=={upstream['version']}"
+        for upstream in parameters_result.get("upstream", {}).values()
+    )
     env_config = {
-        "project": {"name": "research-environment", "version": "0.0.0", "requires-python": config["project"]["requires-python"], "dependencies": [f"{package}=={version['packageVersion']}"]},
+        "project": {"name": "research-environment", "version": "0.0.0", "requires-python": config["project"]["requires-python"], "dependencies": research_dependencies},
         "tool": {"uv": {"package": False, "sources": sources, "constraint-dependencies": constraints}},
     }
     (environment / "pyproject.toml").write_text(tomlkit.dumps(env_config))
@@ -138,12 +144,22 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
     frozen_lock = tomllib.loads((environment / "uv.lock").read_text())
     if any({"directory", "editable"} & p["source"].keys() for p in frozen_lock["package"]):
         raise ValueError("正式环境仍包含未冻结的源码依赖")
-    data = {
-        "kind": "factor", "environment": {"lockfile": str(environment / "uv.lock")},
-        "factor": {"package": package, "version": version["packageVersion"], "wheel": str(wheel),
-                   "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(), "entry": parameters_result["entry"], "params": parameters_result["factor"]},
-        "analysis": parameters_result["analysis"], "output": str(target / "report"),
-    }
+    component = {"package": package, "version": version["packageVersion"], "wheel": str(wheel),
+                 "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(), "entry": parameters_result["entry"]}
+    data = {"environment": {"lockfile": str(environment / "uv.lock")}, "output": str(target / "report")}
+    if "factor" in parameters_result:
+        data.update(kind="factor", factor={**component, "params": parameters_result["factor"]},
+                    analysis=parameters_result["analysis"])
+    else:
+        components = {parameters_result["project_kind"]: component}
+        for kind, upstream in parameters_result.get("upstream", {}).items():
+            location = sources.get(upstream["package"], {})
+            if "path" not in location:
+                raise ValueError(f"上游 {upstream['package']} 缺少冻结 wheel，请通过插件安装项目后重试")
+            upstream_wheel = Path(location["path"])
+            components[kind] = {**upstream, "wheel": str(upstream_wheel),
+                                "sha256": hashlib.sha256(upstream_wheel.read_bytes()).hexdigest()}
+        data.update(kind=parameters_result["project_kind"], algos=components, backtest=parameters_result["backtest"])
     (target / "input.json").write_text(json.dumps(data, ensure_ascii=False, indent=2))
     (target / "build.json").write_text(json.dumps({"scheme_version": installed["version"]}))
 
@@ -188,8 +204,6 @@ class VersionsHandler(DependenciesHandler):
             return
         if action != "save" or not isinstance(body.get("parameters"), dict):
             raise web.HTTPError(400, reason="请先填写研究参数")
-        if project["kind"] != "factor":
-            raise web.HTTPError(422, reason="当前保存入口支持因子项目")
         directory = Path(self.settings["server_root_dir"]) / project["path"]
         try:
             await asyncio.to_thread(parameters, directory, body["parameters"])

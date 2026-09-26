@@ -9,6 +9,7 @@ config/dolphindb-extension/
 config/migrated
 config/serverconfig/
 config/kernels/
+config/notary/
 __pycache__/
 *.py[cod]
 node_modules/

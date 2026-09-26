@@ -18,6 +18,7 @@ interface JsonSchema {
   type?: string; format?: string; title?: string;
   properties?: Record<string, JsonSchema>; items?: JsonSchema;
   enum?: (string | number | boolean)[]; anyOf?: JsonSchema[];
+  const?: string | number | boolean;
   minimum?: number; maximum?: number;
   'x-hidden'?: boolean; 'x-enum-labels'?: string[];
 }
@@ -43,7 +44,8 @@ function parameterFields(schema: JsonSchema, prefix: string, root = schema): Par
     const key = `${prefix}.${name}`;
     if (spec.type === 'object') return parameterFields(spec, key, root);
     const base = { key, label: spec.title ?? name, nullable };
-    if (spec.enum) return [{ ...base, control: 'select' as const, options: spec.enum.map((value, index) => ({ value, label: spec['x-enum-labels']?.[index] ?? String(value) })) }];
+    const choices = spec.enum ?? (spec.const !== undefined ? [spec.const] : undefined);
+    if (choices) return [{ ...base, control: 'select' as const, options: choices.map((value, index) => ({ value, label: spec['x-enum-labels']?.[index] ?? String(value) })) }];
     if (spec.type === 'integer' || spec.type === 'number') return [{ ...base, control: 'number' as const, min: spec.minimum, max: spec.maximum, step: spec.type === 'integer' ? 1 : undefined }];
     if (spec.type === 'boolean') return [{ ...base, control: 'checkbox' as const }];
     if (spec.type === 'array') {
@@ -119,6 +121,7 @@ class ParameterBody extends ReactWidget {
           {field.options?.map((option) => <Option key={String(option.value)} value={String(option.value)}>{option.label}</Option>)}
         </Select></div>;
         if (field.control === 'number') return <NumberField {...properties} min={field.min} max={field.max} step={field.step}
+          ref={(node) => { if (node && field.step === undefined) { node.proxy.step = 'any'; node.validate(); } }}
           onInput={(event) => { const text = (event.target as HTMLInputElement).value; this.change(field, text === '' ? '' : Number(text)); }}>{field.label}</NumberField>;
         if (field.control === 'date') return <DateField {...properties}
           onInput={(event) => this.change(field, (event.target as HTMLInputElement).value)}>{field.label}</DateField>;
@@ -198,7 +201,7 @@ export function ProjectVersions({ project, saveFiles }: { project: Project; save
   const labels: Record<string, string> = { building: '正在构建', queued: '等待执行', running: '正在运行', success: '报告已生成', failed: '保存失败', submit_failed: '提交失败' };
   return <>
     <div className="solo-project-actions">
-      <Button appearance="accent" disabled={opening || recovering || version?.phase === 'building' || project.kind !== 'factor'} onClick={() => void open()}>
+      <Button appearance="accent" disabled={opening || recovering || version?.phase === 'building'} onClick={() => void open()}>
         {opening ? '研究参数…' : '保存版本'}
       </Button>
       {version?.phase === 'building' && <Button disabled={recovering} onClick={() => void recover('cancel')}>取消构建</Button>}

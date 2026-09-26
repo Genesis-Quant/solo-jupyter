@@ -21,7 +21,10 @@ Solo 本地部署使用父目录的 `docker-compose.yml`，在父目录执行 `d
 插件通过 `SOLO_BACKEND_URL`（默认 `http://backend:8000`）连接后端，列表与安装接口为 `GET/POST <base_url>/solo/project/dependencies`。
 
 后续提交和上游管理插件通过 `IProjectContext` token 获取当前项目、监听 `changed` 或调用 `refresh()`。
-因子项目支持填写研究参数后保存版本。构建中断时可点击“取消构建”解除保存锁定；
+五类项目均支持填写研究参数后保存版本。表单由 Scheme 对应的 ReportForm 生成；
+Model 选择默认后续算法，Optimize、Control、Execution 从已安装项目中选择上游，补齐后续默认环节。
+保存时冻结当前包及上游包，因子提交 factor 工作流，其余四类提交 backtest 工作流并展示完整回测报告。
+构建中断时可点击“取消构建”解除保存锁定；
 调度服务明确未接收任务时可点击“重试提交”，复用该版本的构建产物。
 提交响应丢失时通过“核实提交”查找已有任务，不重复提交工作流。发布接口尚未接入。
 

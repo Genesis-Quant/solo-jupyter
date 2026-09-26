@@ -1,4 +1,7 @@
 {
+  "NotebookNotary": {
+    "data_dir": "/home/jovyan/.jupyter/notary"
+  },
   "FileContentsManager": {
     "always_delete_dir": true,
     "hide_globs": [
