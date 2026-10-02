@@ -9,6 +9,16 @@ description = "Solo project integration for JupyterLab"
 requires-python = ">=3.12"
 dependencies = ["jupyterlab>=4.6,<5", "jupyter-server>=2,<3", "packaging>=24", "tomlkit>=0.13,<1"]
 
+[project.entry-points.pylsp]
+solo_project_environment = "solo_jupyter.lsp"
+
+[dependency-groups]
+dev = ["pytest>=8.4,<9", "python-lsp-server==1.15.0", "jupyter-lsp==2.3.1"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["solo_jupyter"]
 

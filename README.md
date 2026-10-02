@@ -1,6 +1,6 @@
 # Jupyter
 
-Solo 本地部署使用父目录的 `docker-compose.yml`，在父目录执行 `docker compose up -d --build --wait`。共享工作区为 `/shared/projects`，运行结果为 `/shared/runs`；凭据库使用命名卷，密钥位于父目录 `.secrets/jupyter-keyring-password`。代理为可选配置，不依赖 nj 的外部网络。具体配置见父目录 README。
+Solo 本地部署使用父目录的 `docker-compose.yml`，在父目录执行 `docker compose up -d --build --wait`。共享工作区为 `/shared/projects`，运行结果为 `/shared/runs`；凭据库使用命名卷，解锁密码统一配置在父目录 `.env` 的 `JUPYTER_KEYRING_PASSWORD`。代理为可选配置，不依赖 nj 的外部网络。具体配置见父目录 README。
 
 ## Solo 插件
 
@@ -55,7 +55,7 @@ jupyter server extension list
 - IPython 默认配置：`./ipython_config.py`，只读挂载到 `/etc/ipython/ipython_config.py`，默认隐藏 `%` / `%%` Magic 补全候选。
 - 登录令牌保存在 `.env` 的 `JUPYTER_TOKEN` 中；该文件不提交到 Git。
 
-启动时使用 root 修正挂载目录归属，然后由镜像切换为 `jovyan`（UID 1000、GID 100）。`start-jupyter.sh` 检查中文语言包已安装，再调用镜像原有的 `start-notebook.py` 运行 Jupyter。
+独立 Compose 启动时使用镜像原有入口修正挂载目录归属并切换为 `jovyan`（UID 1000、GID 100）。Compose 命令直接启动 D-Bus 会话、通过 `.env` 的 `JUPYTER_KEYRING_PASSWORD` 解锁凭据库，然后调用镜像原生 `start-notebook.py`；没有自定义启动脚本。中文语言包固定在镜像依赖中。
 
 ## 管理
 
@@ -139,13 +139,14 @@ jupyter nbconvert --to pdf "你的文件.ipynb"
 
 ### 系统凭据库
 
-容器内使用 GNOME Keyring 的 Secret Service。启动脚本在同一个 D-Bus 会话中解锁凭据库并启动 Jupyter；
+容器内使用 GNOME Keyring 的 Secret Service。Compose 在同一个 D-Bus 会话中解锁凭据库并启动 Jupyter；
 在 DolphinDB 连接编辑界面输入密码、勾选“记住密码”并保存后，密码会写入加密凭据库。
 
-`keyring-data/` 持久化加密凭据，`secrets/jupyter-keyring-password` 保存自动解锁密钥，
-通过 Compose secret 只读挂载到容器。解锁密钥不进入镜像，也不通过命令行参数或环境变量传递。
-这两个路径位于 Notebook 文件根目录之外，权限分别为 `0700` 和 `0600`；应限制宿主机上的读取权限。
-备份时需要保留解锁密钥和加密凭据，并分别妥善保存；直接替换密钥会导致已有凭据无法解锁。
+解锁密码统一放在 `.env` 的 `JUPYTER_KEYRING_PASSWORD`，通过容器环境变量提供，解锁后从 Jupyter 进程环境中移除；
+不需要单独密码文件、额外目录或 Compose secret。Docker 管理者仍可查看容器配置中的环境变量，应限制 `.env` 读取权限。
+独立 Compose 的 `keyring-data/` 和 Solo 的 `jupyter-keyrings` 命名卷只保存加密凭据，继续持久化且不重建。
+备份时需要同时保留凭据库与 `.env` 中的原解锁密码；已有凭据库不能随意更换密码。
+迁移原密码时必须保留全部字节，包括原本参与解锁的换行；可在 `.env` 的双引号值中用 `\r`、`\n` 转义表示，不要去除它们。
 
 重建会沿用现有密钥和凭据文件。未勾选“记住密码”的连接仍使用临时密码。
 参考：[keyring 的无桌面 Linux 配置](https://keyring.readthedocs.io/en/latest/#using-keyring-on-headless-linux-systems)。
@@ -190,6 +191,22 @@ Codex 的配置、登录信息和会话保存在 Docker 命名卷 `codex-home`�
 镜像通过 `requirements-code-check.txt` 固定 `jupyterlab-lsp`、`jupyter-lsp`、`python-lsp-server`、`python-lsp-ruff` 和 `ruff`。检查设置保存在 `config/lab/user-settings/@jupyter-lsp/jupyterlab-lsp/plugin.jupyterlab-settings`，优先使用 `pylsp`，由 Ruff 提供检查并关闭重复的检查器。
 
 首次安装语言服务器后，需要重启 Jupyter 服务并刷新浏览器，才能在 Notebook 和 Python 文件中看到检查提示。重启服务会结束当前内核并清空内存变量，请先保存工作。后续可在“设置 → 设置编辑器 → Language Server”中调整检查配置。
+
+### 按项目绑定 Python 代码智能
+
+`solo-jupyter` 同时注册 `solo_project_environment` pylsp 插件。插件在服务端初始化、配置更新和文档请求时自动启用 `solo` 配置源；前端 `pylsp.configurationSources` 保留 `pycodestyle` 等内置值，不添加前端 schema 不支持的 `solo`。每个文档按 `/shared/projects/<类型>/<项目>` 识别所属项目，校验 `.solo`、`pyproject.toml`、`src` 和 `.venv`，分别使用项目 `.venv/bin/python` 与 `src`。不根据当前标签页或 Kernel 改写全局设置，多项目可同时补全、悬浮和 Alt+点击跳转。
+
+Notebook 的 Python 虚拟文档保留原始相对路径；插件将 `JP_LSP_VIRTUAL_DIR` 下的文档映射回 `SOLO_SHARED_DIR`，再识别同一项目。非项目文件、无效标识或尚未创建的环境使用默认配置，不借用其他项目的依赖。
+
+打开文档及代码智能请求前会检查文档所属项目、项目标识、依赖清单、锁文件、环境目录及 site-packages 下直接 `.pth` 文件的变化；变化时清除 pylsp 共享配置缓存，并仅移除受影响项目的 Jedi 环境缓存。定义与类型定义、补全、悬浮、引用、签名、检查、文档符号、高亮及重命名均在对应 pylsp hook 中刷新；动态增删工作区后，按文档实际持有的配置与工作区清除缓存，无需关闭重开文档。正常 uv 管理的解释器符号链接受到支持，但项目/环境目录不能通过符号链接逃逸。支持当前固定的 `python-lsp-server==1.15.0`；配置源注册和环境缓存使用其私有接口，升级时应运行回归测试。
+
+测试在 `extension/` 中执行：
+
+```bash
+uv run --group dev pytest -q
+```
+
+依赖源码定位由此恢复，但 Jedi 对部分泛型、动态属性的推断仍有限；编译库跳转到 `.pyi` 类型声明属于正常行为。
 
 也可以在 Jupyter 终端中执行：
 

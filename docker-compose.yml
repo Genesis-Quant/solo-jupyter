@@ -15,9 +15,17 @@ services:
     user: root
     working_dir: /home/jovyan/work
     command:
-      - start-jupyter.sh
-      - --ServerApp.root_dir=/home/jovyan/work
-      - --ServerApp.default_url=/lab
+      - bash
+      - -ec
+      - |
+        exec dbus-run-session -- bash -euc '
+          printf "%s" "$$JUPYTER_KEYRING_PASSWORD" |
+            gnome-keyring-daemon --unlock --components=secrets --daemonize >/dev/null
+          export PYTHON_KEYRING_BACKEND=keyring.backends.SecretService.Keyring
+          unset JUPYTER_KEYRING_PASSWORD
+          python -B -c "import secretstorage, sys; sys.exit(secretstorage.get_default_collection(secretstorage.dbus_init()).is_locked())"
+          exec start-notebook.py --ServerApp.root_dir=/home/jovyan/work --ServerApp.default_url=/lab
+        '
     mem_limit: 4096m
     memswap_limit: 4096m
     environment:
@@ -26,6 +34,7 @@ services:
       CHOWN_HOME: "yes"
       CHOWN_HOME_OPTS: "-R"
       JUPYTER_TOKEN: ${JUPYTER_TOKEN:?Set JUPYTER_TOKEN in .env}
+      JUPYTER_KEYRING_PASSWORD: ${JUPYTER_KEYRING_PASSWORD:?Set JUPYTER_KEYRING_PASSWORD in .env}
       HTTP_PROXY: http://metacubexd:7891
       HTTPS_PROXY: http://metacubexd:7891
       ALL_PROXY: http://metacubexd:7891
@@ -43,17 +52,11 @@ services:
       - codex-home:/home/jovyan/.codex
       - ./config/nbconvert/templates/latex:/home/jovyan/.local/share/jupyter/nbconvert/templates/latex
       - ./ipython_config.py:/etc/ipython/ipython_config.py:ro
-    secrets:
-      - jupyter-keyring-password
     networks:
       - 1panel-network
 
 volumes:
   codex-home:
-
-secrets:
-  jupyter-keyring-password:
-    file: ./secrets/jupyter-keyring-password
 
 networks:
   1panel-network:

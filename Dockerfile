@@ -57,8 +57,6 @@ RUN ln -sf /opt/jupyter-codex/node_modules/.bin/codex /usr/local/bin/codex \
 USER ${NB_UID}
 RUN node --version && codex --version && codex-acp --version
 
-COPY --chmod=755 start-jupyter.sh /usr/local/bin/start-jupyter.sh
-
 RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: uv==0.12.10 \
     && uv --version \
     && uvx --version \
@@ -88,7 +86,7 @@ RUN printf '%s\n' \
     && rm -f /tmp/keyring-apt.list \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --chmod=755 with-keyring.sh /usr/local/bin/with-keyring.sh
+RUN rm -f /usr/local/bin/start-jupyter.sh /usr/local/bin/with-keyring.sh
 USER ${NB_UID}
 
 RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: jupyterlab-execute-time==3.3.0 \
