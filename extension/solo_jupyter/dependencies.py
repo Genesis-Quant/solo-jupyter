@@ -346,6 +346,7 @@ async def _freeze_runtime(root: Path, directory: Path, source: Path, temporary: 
         frozen[name] = requirement
 
     async def build(path: Path, extras: frozenset[str] = frozenset(), expected: str | None = None) -> Path:
+        extras = frozenset(canonicalize_name(extra) for extra in extras)
         path = _safe_path(root, path)
         if path in visiting or len(built) >= 64:
             raise web.HTTPError(422, reason="本地运行依赖存在循环或项目过多")
@@ -406,7 +407,7 @@ async def _freeze_runtime(root: Path, directory: Path, source: Path, temporary: 
                 for location in records:
                     if location.get("marker") and not Requirement(f"{name}; {location['marker']}").marker.evaluate(markers):
                         continue
-                    if location.get("extra") and location["extra"] not in extras:
+                    if location.get("extra") and canonicalize_name(location["extra"]) not in extras:
                         continue
                     if "path" in location:
                         dependency = _safe_path(root, path / location["path"])

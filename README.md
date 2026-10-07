@@ -15,7 +15,7 @@ Solo 本地部署使用父目录的 `docker-compose.yml`，在父目录执行 `d
 
 “安装已有项目”从 Solo 后端读取未归档且未退役的项目，仅列出当前类型及其上游类型、且 Scheme 主版本和次版本相同的其他项目，补丁版本不必相同。1.2.0 与 1.2.7 可双向安装，1.1.x、1.3.x 不混用；安装接口也执行同一校验，不能绕过候选列表。项目包的实际版本须属于同一系列，并声明整个系列的依赖范围，如 `scheme>=1.2.0,<1.3.0`。类型顺序为 factor → model → optimize → control → execution；同类项目可以相互选择，自身不能安装。
 
-安装前由 Backend 中央政策检查当前项目、候选项目和递归本地运行时依赖的发布来源。对方已保存的源码及其必要本地依赖先构建为 wheel，保存至当前项目的 `.solo-wheels/<包名>/<SHA256>/<文件名>`；不递归上游开发依赖，不传递上游 `tool.uv.sources.scheme`。wheel 的原始 `Requires-Dist` 保留，正常解析所有直接和传递依赖的交集，不创建 Scheme override，也不改写依赖要求来掩盖冲突；已有 Scheme override 必须先移除并验证环境。
+安装前由 Backend 中央政策检查当前项目、候选项目和递归本地运行时依赖的发布来源。对方已保存的源码及其必要本地依赖先构建为 wheel，保存至当前项目的 `.solo-wheels/<包名>/<SHA256>/<文件名>`；不递归上游开发依赖，不传递上游 `tool.uv.sources.scheme`。运行时 extras 按 PEP 685 规范化，`gpu_fast`、`gpu-fast` 等等价拼写使用同一来源选择与递归准入。wheel 的原始 `Requires-Dist` 保留，正常解析所有直接和传递依赖的交集，不创建 Scheme override，也不改写依赖要求来掩盖冲突；已有 Scheme override 必须先移除并验证环境。
 
 完整解析、安装与元数据检查先在同盘隔离目录执行。预检失败不改真实配置、锁文件或环境；预检通过后，将原 `.venv` 同盘移动为本次事务的临时备份，再提交真实安装。失败恢复原 `.venv`、`pyproject.toml` 和 `uv.lock`，不只恢复配置；成功清理本次备份。当前 Scheme source 和锁定的实际补丁版本保持不变。wheel 是非 editable 的源码快照，再次安装修改后的源码生成新内容哈希，不覆盖旧冻结资产。
 

@@ -651,6 +651,81 @@ def test_real_uv_local_runtime_recursion_ignores_dev_graph_and_source_scheme(uv_
         assert file_snapshot(path) == files
 
 
+@pytest.mark.parametrize("requested_extra, source_extra", [
+    ("gpu-fast", "gpu_fast"), ("gpu_fast", "gpu-fast"),
+    ("GPU.Fast", "gpu_fast"), ("gpu_fast", "GPU.Fast"),
+])
+def test_real_uv_normalized_extras_freeze_and_admit_local_runtime_sources(
+    uv_projects, admission, requested_extra, source_extra,
+):
+    root, current, candidate = uv_projects
+    directory, source = root / current["path"], root / candidate["directory"]
+    middle, leaf = root / "libraries/middle", root / "projects/factor/extra-leaf"
+    leaf_id = str(uuid4())
+    write_offline_package(middle, "middle-package", "0.1.0")
+    middle_config = middle / "pyproject.toml"
+    middle_config.write_text(middle_config.read_text() + f'\n[project.optional-dependencies]\n{json.dumps(source_extra)} = ["normalized-leaf>=1.2"]\n')
+    write_offline_package(leaf, "normalized-leaf", "1.2.7", ["scheme>=1.2.0,<1.3.0"])
+    (leaf / ".solo").write_text(json.dumps({
+        "project_id": leaf_id, "name": "extra-leaf", "kind": "factor", "scheme_version": "1.2.7",
+    }))
+    path = source / "pyproject.toml"
+    config = tomllib.loads(path.read_text())
+    requirements = ["scheme>=1.2.0,<1.3.0", f"middle-package[{requested_extra}]>=0.1"]
+    path.write_text(path.read_text().replace(json.dumps(config["project"]["dependencies"]), json.dumps(requirements)))
+    set_sources(source, {"middle-package": {"path": str(middle)}})
+    set_sources(middle, {"normalized-leaf": {"path": str(leaf), "extra": source_extra}})
+    sync_fixture(root, current)
+    before = {path: file_snapshot(path) for path in (source, middle, leaf)}
+    assert asyncio.run(dependencies.install_project(root, current, candidate, dev=False)) == "source-package"
+    admission.assert_any_await(leaf_id)
+    actual = installed(directory)
+    assert actual["normalized-leaf"]["version"] == "1.2.7"
+    assert actual["scheme"]["version"] == "1.2.0"
+    lock = tomllib.loads((directory / "uv.lock").read_text())
+    selected = next(item for item in lock["package"] if item["name"] == "normalized-leaf")
+    assert ".solo-wheels/normalized-leaf/" in selected["source"]["path"]
+    for path, snapshot in before.items():
+        assert file_snapshot(path) == snapshot
+
+
+@pytest.mark.parametrize("requested_extra, source_extra", [("gpu-fast", "gpu_fast"), ("gpu_fast", "gpu-fast")])
+def test_normalized_extra_retired_leaf_is_denied_before_asset_publication(
+    uv_projects, admission, requested_extra, source_extra,
+):
+    root, current, candidate = uv_projects
+    directory, source = root / current["path"], root / candidate["directory"]
+    middle, leaf = root / "libraries/middle", root / "projects/factor/retired-extra-leaf"
+    leaf_id = str(uuid4())
+    write_offline_package(middle, "middle-package", "0.1.0")
+    middle_config = middle / "pyproject.toml"
+    middle_config.write_text(middle_config.read_text() + f'\n[project.optional-dependencies]\n{json.dumps(source_extra)} = ["normalized-leaf>=1.2"]\n')
+    write_offline_package(leaf, "normalized-leaf", "1.2.7", ["scheme>=1.2.0,<1.3.0"])
+    (leaf / ".solo").write_text(json.dumps({
+        "project_id": leaf_id, "name": "retired-extra-leaf", "kind": "factor", "scheme_version": "1.2.7",
+    }))
+    path = source / "pyproject.toml"
+    path.write_text(path.read_text().replace('["scheme>=1.2.0,<1.3.0"]', json.dumps([
+        "scheme>=1.2.0,<1.3.0", f"middle-package[{requested_extra}]>=0.1",
+    ])))
+    set_sources(source, {"middle-package": {"path": str(middle)}})
+    set_sources(middle, {"normalized-leaf": {"path": str(leaf), "extra": source_extra}})
+    sync_fixture(root, current)
+    before = file_snapshot(directory)
+    directories = {path.relative_to(directory) for path in directory.rglob("*") if path.is_dir()}
+    async def deny(identifier):
+        if identifier == leaf_id:
+            assert file_snapshot(directory) == before
+            assert not (directory / ".solo-wheels").exists()
+            raise web.HTTPError(422, reason="normalized extra source retired")
+    admission.side_effect = deny
+    with pytest.raises(web.HTTPError, match="normalized extra source retired"):
+        asyncio.run(dependencies.install_project(root, current, candidate))
+    admission.assert_any_await(leaf_id)
+    assert file_snapshot(directory) == before
+    assert {path.relative_to(directory) for path in directory.rglob("*") if path.is_dir()} == directories
+
+
 def test_retired_recursive_runtime_project_leaves_no_real_assets_or_directories(uv_projects, admission):
     root, current, candidate = uv_projects
     directory, source = root / current["path"], root / candidate["directory"]
