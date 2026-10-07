@@ -13,17 +13,20 @@ Solo 本地部署使用父目录的 `docker-compose.yml`，在父目录执行 `d
 主题、图标、命令与文件打开均使用 Jupyter 原生能力。CSS 只设置间距和滚动。
 服务端提供需登录的 `GET <base_url>/solo/project?path=<相对路径>`，读取项目描述，不开放隐藏文件通用读取。
 
-“安装已有项目”从 Solo 后端读取未归档项目，仅列出当前类型及其上游类型、且 Scheme 大版本相同的其他项目。
-类型顺序为 factor → model → optimize → control → execution；同类项目可以相互选择，自身不能安装。
-点击安装会执行 `uv add --no-workspace --upgrade-package <包名> --reinstall-package <包名> <项目目录>`，将对方当前已保存的源码构建安装到当前项目的 `.venv`，同步更新 `pyproject.toml` 和 `uv.lock`。
-安装的是本地项目包，不是已发布版本，也不是 editable 安装；源码修改后可再次点击安装更新。
+“安装已有项目”从 Solo 后端读取未归档且未退役的项目，仅列出当前类型及其上游类型、且 Scheme 主版本和次版本相同的其他项目，补丁版本不必相同。1.2.0 与 1.2.7 可双向安装，1.1.x、1.3.x 不混用；安装接口也执行同一校验，不能绕过候选列表。项目包的实际版本须属于同一系列，并声明整个系列的依赖范围，如 `scheme>=1.2.0,<1.3.0`。类型顺序为 factor → model → optimize → control → execution；同类项目可以相互选择，自身不能安装。
+
+安装前由 Backend 中央政策检查当前项目、候选项目和递归本地运行时依赖的发布来源。对方已保存的源码及其必要本地依赖先构建为 wheel，保存至当前项目的 `.solo-wheels/<包名>/<SHA256>/<文件名>`；不递归上游开发依赖，不传递上游 `tool.uv.sources.scheme`。wheel 的原始 `Requires-Dist` 保留，正常解析所有直接和传递依赖的交集，不创建 Scheme override，也不改写依赖要求来掩盖冲突；已有 Scheme override 必须先移除并验证环境。
+
+完整解析、安装与元数据检查先在同盘隔离目录执行。预检失败不改真实配置、锁文件或环境；预检通过后，将原 `.venv` 同盘移动为本次事务的临时备份，再提交真实安装。失败恢复原 `.venv`、`pyproject.toml` 和 `uv.lock`，不只恢复配置；成功清理本次备份。当前 Scheme source 和锁定的实际补丁版本保持不变。wheel 是非 editable 的源码快照，再次安装修改后的源码生成新内容哈希，不覆盖旧冻结资产。
+
+安装、参数读取和版本快照在 Jupyter Server 同一进程内按项目 UUID 排他，重叠请求立即返回 409；不会让保存读到安装事务中的混合配置/锁文件。当前环境含其他可变目录依赖、候选依赖声明含需要保留的 extras/marker 选择，或 wheel 依赖直接指向本地源码目录时明确拒绝，不静默删除选项或交给解析器修改真实目录。先冻结为普通 wheel 或移除不支持的开发依赖后再安装；此接口不提供通用依赖图迁移。固定 Git 运行时来源在事务目录检出准确 commit 并构建 wheel，不读取脏工作树或传播对方 Scheme source。
 已被 Kernel 导入的包需要重启 Kernel 才能加载新代码。项目改名导致路径变化时，需重新选择安装。
 插件通过 `SOLO_BACKEND_URL`（默认 `http://backend:8000`）连接后端，列表与安装接口为 `GET/POST <base_url>/solo/project/dependencies`。
 
 后续提交和上游管理插件通过 `IProjectContext` token 获取当前项目、监听 `changed` 或调用 `refresh()`。
 五类项目均支持填写研究参数后保存版本。表单由 Scheme 对应的 ReportForm 生成；
 Model 选择默认后续算法，Optimize、Control、Execution 从已安装项目中选择上游，补齐后续默认环节。
-保存时冻结当前包及上游包，因子提交 factor 工作流，其余四类提交 backtest 工作流并展示完整回测报告。
+保存时冻结当前包及上游包，按实际项目类型提交 factor、model、optimize、control 或 execution 工作流；后三类和 model 当前均展示完整回测报告。打开参数面板、验证和保存前检查中央准入，后台构建开始前再次检查；退役项目保留源码、Notebook 与历史版本查看，但不能新保存或安装为上游。
 构建中断时可点击“取消构建”解除保存锁定；
 调度服务明确未接收任务时可点击“重试提交”，复用该版本的构建产物。
 提交响应丢失时通过“核实提交”查找已有任务，不重复提交工作流。发布接口尚未接入。

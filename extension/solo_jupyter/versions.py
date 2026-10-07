@@ -14,7 +14,7 @@ import tomllib
 from tornado import web
 from tornado.httpclient import AsyncHTTPClient, HTTPClientError
 
-from .dependencies import DependenciesHandler
+from .dependencies import DependenciesHandler, check_project_release, project_operation
 
 _tasks: set[asyncio.Task] = set()
 
@@ -32,7 +32,11 @@ async def backend(path: str, body: dict | None = None) -> dict | list:
     except HTTPClientError as error:
         message = "无法访问 Solo Backend"
         if error.response:
-            message = json.loads(error.response.body).get("detail", message)
+            try:
+                detail = json.loads(error.response.body).get("detail", message)
+                message = detail.get("reason", message) if isinstance(detail, dict) else detail
+            except (ValueError, AttributeError):
+                pass
         raise web.HTTPError(error.code if error.code < 600 else 502, reason=str(message)) from error
 
 
@@ -62,7 +66,7 @@ def parameters(directory: Path, values: dict | None = None, source: Path | None 
 
 def copy_source(source: Path, destination: Path) -> None:
     def ignore(directory: str, names: list[str]) -> set[str]:
-        return {name for name in names if name in {".venv", ".git", ".ipynb_checkpoints", "__pycache__", "dist", "build", ".pytest_cache", ".ruff_cache"}}
+        return {name for name in names if name in {".venv", ".git", ".solo-wheels", ".ipynb_checkpoints", "__pycache__", "dist", "build", ".pytest_cache", ".ruff_cache"}}
 
     # 冻结内容不跟随指向项目外部的符号链接。
     for directory, folders, files in os.walk(source):
@@ -164,14 +168,40 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
     (target / "build.json").write_text(json.dumps({"scheme_version": installed["version"]}))
 
 
-async def save(directory: Path, project: dict, version: dict, values: dict) -> None:
+async def _project_thread(function, *arguments):
+    """请求取消也等待已开始的源码读取结束，再释放项目排他入口。"""
+    task = asyncio.create_task(asyncio.to_thread(function, *arguments))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await task
+        finally:
+            raise
+
+
+async def _save(directory: Path, project: dict, version: dict, values: dict) -> None:
     endpoint = f'{project["project_id"]}/versions/{version["id"]}/submit'
     try:
-        await asyncio.to_thread(build_version, directory, version, values)
-    except (OSError, ValueError, KeyError, StopIteration, subprocess.SubprocessError) as error:
-        await backend(endpoint, {"error": str(error)[-10000:]})
+        await check_project_release(project["project_id"])
+        await _project_thread(build_version, directory, version, values)
+    except (OSError, ValueError, KeyError, StopIteration, subprocess.SubprocessError, web.HTTPError) as error:
+        message = error.reason if isinstance(error, web.HTTPError) else str(error)
+        await backend(endpoint, {"error": message[-10000:]})
         return
     await backend(endpoint, {})
+
+
+async def save(directory: Path, project: dict, version: dict, values: dict) -> None:
+    with project_operation(project["project_id"]):
+        await _save(directory, project, version, values)
+
+
+async def _save_owned(operation, directory: Path, project: dict, version: dict, values: dict) -> None:
+    try:
+        await _save(directory, project, version, values)
+    finally:
+        operation.__exit__(None, None, None)
 
 
 class VersionsHandler(DependenciesHandler):
@@ -179,11 +209,13 @@ class VersionsHandler(DependenciesHandler):
     async def get(self) -> None:
         project = self.current_project(self.get_query_argument("path", ""))
         if self.get_query_argument("parameters", "") == "1":
-            directory = Path(self.settings["server_root_dir"]) / project["path"]
-            try:
-                self.finish(await asyncio.to_thread(parameters, directory))
-            except (ValueError, OSError) as error:
-                raise web.HTTPError(422, reason=str(error)) from error
+            with project_operation(project["project_id"]):
+                await check_project_release(project["project_id"])
+                directory = Path(self.settings["server_root_dir"]) / project["path"]
+                try:
+                    self.finish(await _project_thread(parameters, directory))
+                except (ValueError, OSError) as error:
+                    raise web.HTTPError(422, reason=str(error)) from error
         else:
             self.finish({"versions": await backend(f'{project["project_id"]}/versions')})
 
@@ -204,17 +236,28 @@ class VersionsHandler(DependenciesHandler):
             return
         if action != "save" or not isinstance(body.get("parameters"), dict):
             raise web.HTTPError(400, reason="请先填写研究参数")
-        directory = Path(self.settings["server_root_dir"]) / project["path"]
+        operation = project_operation(project["project_id"])
+        operation.__enter__()
+        transferred = False
         try:
-            await asyncio.to_thread(parameters, directory, body["parameters"])
-        except (ValueError, OSError) as error:
-            raise web.HTTPError(422, reason=str(error)) from error
-        if body.get("validate_only"):
-            self.finish({"valid": True})
-            return
-        version = await backend(f'{project["project_id"]}/versions', {"note": body.get("note", "")})
-        task = asyncio.create_task(save(directory, project, version, body["parameters"]))
-        _tasks.add(task)
-        task.add_done_callback(_tasks.discard)
-        self.set_status(202)
-        self.finish(version)
+            await check_project_release(project["project_id"])
+            directory = Path(self.settings["server_root_dir"]) / project["path"]
+            try:
+                await _project_thread(parameters, directory, body["parameters"])
+            except (ValueError, OSError) as error:
+                raise web.HTTPError(422, reason=str(error)) from error
+            if body.get("validate_only"):
+                self.finish({"valid": True})
+                return
+            version = await backend(f'{project["project_id"]}/versions', {"note": body.get("note", "")})
+            task = asyncio.create_task(_save_owned(operation, directory, project, version, body["parameters"]))
+            _tasks.add(task)
+            task.add_done_callback(_tasks.discard)
+            # 若 task 在启动前即被取消，done callback 也释放已有入口。
+            task.add_done_callback(lambda _: operation.__exit__(None, None, None))
+            transferred = True
+            self.set_status(202)
+            self.finish(version)
+        finally:
+            if not transferred:
+                operation.__exit__(None, None, None)
