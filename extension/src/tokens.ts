@@ -8,6 +8,7 @@ export interface Project {
   readonly project_id: string;
   readonly name: string;
   readonly kind: ProjectKind;
+  readonly package_name?: string | null;
   readonly scheme_version: string | null;
   readonly scheme_commit: string | null;
   readonly algo_version: string | null;

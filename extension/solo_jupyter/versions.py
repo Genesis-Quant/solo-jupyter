@@ -1,20 +1,23 @@
 """Jupyter 保存入口：冻结源码、构建候选 wheel，再提交正式任务。"""
 import asyncio
+from fnmatch import fnmatch
 import hashlib
 import json
 import os
 import shutil
 import subprocess
+import tomllib
+from copy import deepcopy
 from pathlib import Path
-from uuid import UUID
 from urllib.parse import unquote, urlparse
+from uuid import UUID
 
 import tomlkit
-import tomllib
 from tornado import web
 from tornado.httpclient import AsyncHTTPClient, HTTPClientError
 
-from .dependencies import DependenciesHandler, check_project_release, project_operation
+from .dependencies import DependenciesHandler, _SOURCE_IGNORES, check_project_release, project_operation, recover_installation
+from .uv import uv_environment
 
 _tasks: set[asyncio.Task] = set()
 
@@ -41,7 +44,7 @@ async def backend(path: str, body: dict | None = None) -> dict | list:
 
 
 def command(arguments: list[str], directory: Path, payload: dict | None = None) -> str:
-    environment = {**os.environ, "UV_CACHE_DIR": "/tmp/solo-uv-cache", "UV_LINK_MODE": "copy", "GIT_TERMINAL_PROMPT": "0"}
+    environment = {**os.environ, **uv_environment(directory), "GIT_TERMINAL_PROMPT": "0"}
     for name in ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME", "UV_PROJECT_ENVIRONMENT"):
         environment.pop(name, None)
     result = subprocess.run(arguments, cwd=directory, env=environment,
@@ -66,7 +69,7 @@ def parameters(directory: Path, values: dict | None = None, source: Path | None 
 
 def copy_source(source: Path, destination: Path) -> None:
     def ignore(directory: str, names: list[str]) -> set[str]:
-        return {name for name in names if name in {".venv", ".git", ".solo-wheels", ".ipynb_checkpoints", "__pycache__", "dist", "build", ".pytest_cache", ".ruff_cache"}}
+        return {name for name in names if any(fnmatch(name, pattern) for pattern in _SOURCE_IGNORES)}
 
     # 冻结内容不跟随指向项目外部的符号链接。
     for directory, folders, files in os.walk(source):
@@ -95,6 +98,7 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
     # 沿用工作区的确切 Git commit/版本；所有目录依赖冻结为候选 wheel。
     lock = tomllib.loads((source / "uv.lock").read_text())
     sources = {package: {"path": str(wheel)}}
+    project_uv = config.get("tool", {}).get("uv", {})
     constraints = []
     for item in lock["package"]:
         if item["name"] == package:
@@ -122,6 +126,12 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
             destination = wheels / original.name
             shutil.copy2(original, destination)
             sources[item["name"]] = {"path": str(destination)}
+        elif "registry" in location:
+            selected = project_uv.get("sources", {}).get(item["name"])
+            if isinstance(selected, dict) and "index" in selected:
+                sources[item["name"]] = deepcopy(selected)
+            elif isinstance(selected, list) and all("index" in entry for entry in selected):
+                sources[item["name"]] = deepcopy(selected)
     # 若开发环境安装的是候选 Scheme wheel，保存相同安装内容，不能退回旧 Git 源。
     installed = json.loads(command([str(directory / ".venv/bin/python"), "-c",
         "import importlib.metadata as m,json; d=m.distribution('scheme'); print(json.dumps({'version':d.version,'direct':json.loads(d.read_text('direct_url.json') or '{}')}))"], directory))
@@ -143,6 +153,13 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
         "project": {"name": "research-environment", "version": "0.0.0", "requires-python": config["project"]["requires-python"], "dependencies": research_dependencies},
         "tool": {"uv": {"package": False, "sources": sources, "constraint-dependencies": constraints}},
     }
+    for name in ("index", "index-url", "extra-index-url", "index-strategy"):
+        if name in project_uv:
+            env_config["tool"]["uv"][name] = deepcopy(project_uv[name])
+    if "index-url" not in project_uv and not any(index.get("default") for index in project_uv.get("index", [])):
+        env_config["tool"]["uv"].setdefault("index", []).append({
+            "url": "https://pypi.tuna.tsinghua.edu.cn/simple", "default": True,
+        })
     (environment / "pyproject.toml").write_text(tomlkit.dumps(env_config))
     command(["uv", "lock", "--project", str(environment)], target)
     frozen_lock = tomllib.loads((environment / "uv.lock").read_text())
@@ -194,6 +211,10 @@ async def _save(directory: Path, project: dict, version: dict, values: dict) -> 
 
 async def save(directory: Path, project: dict, version: dict, values: dict) -> None:
     with project_operation(project["project_id"]):
+        root = directory
+        for _ in Path(project["path"]).parts:
+            root = root.parent
+        await recover_installation(root, project)
         await _save(directory, project, version, values)
 
 
@@ -210,6 +231,7 @@ class VersionsHandler(DependenciesHandler):
         project = self.current_project(self.get_query_argument("path", ""))
         if self.get_query_argument("parameters", "") == "1":
             with project_operation(project["project_id"]):
+                await recover_installation(Path(self.settings["server_root_dir"]), project)
                 await check_project_release(project["project_id"])
                 directory = Path(self.settings["server_root_dir"]) / project["path"]
                 try:
@@ -240,6 +262,7 @@ class VersionsHandler(DependenciesHandler):
         operation.__enter__()
         transferred = False
         try:
+            await recover_installation(Path(self.settings["server_root_dir"]), project)
             await check_project_release(project["project_id"])
             directory = Path(self.settings["server_root_dir"]) / project["path"]
             try:

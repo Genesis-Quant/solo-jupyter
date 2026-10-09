@@ -16,7 +16,7 @@ COPY extension/package.json extension/package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY extension/ ./
 RUN npm run build -- --core-package-file "$(python -c 'from pathlib import Path; import jupyterlab; print(Path(jupyterlab.__file__).parent / "staging" / "package.json")')" \
-    && python -m pip wheel --no-cache-dir --no-deps --wheel-dir /tmp/solo-wheel .
+    && python -m pip wheel --no-cache-dir --no-deps --index-url https://pypi.tuna.tsinghua.edu.cn/simple --wheel-dir /tmp/solo-wheel .
 
 FROM ${NOTEBOOK_IMAGE}
 
@@ -96,6 +96,8 @@ RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: lckr-jupy
     && python -m pip check
 
 COPY --from=solo-extension /tmp/solo-wheel /tmp/solo-wheel
-RUN python -m pip install --no-cache-dir 'tomlkit>=0.13,<1' \
+RUN python -m pip install --no-cache-dir --index-url https://pypi.tuna.tsinghua.edu.cn/simple 'tomlkit>=0.13,<1' \
     && python -m pip install --no-cache-dir --no-deps /tmp/solo-wheel/*.whl \
     && python -m pip check
+
+COPY uv.toml /etc/uv/uv.toml

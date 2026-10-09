@@ -1,4 +1,7 @@
 import asyncio
+import json
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -181,3 +184,61 @@ def test_recovery_uses_backend_record_decision(project, monkeypatch, action, end
     asyncio.run(versions.VersionsHandler.post(request))
     admission.assert_not_called()
     backend.assert_awaited_once_with(f'{project["project_id"]}/versions/{identifier}/{endpoint}', {})
+
+
+@pytest.mark.parametrize("policy", [
+    {"index": [{"url": "https://pypi.tuna.tsinghua.edu.cn/simple", "default": True}]},
+    {"index": [{"name": "private", "url": "https://packages.example/simple", "default": True}],
+     "index-strategy": "first-index"},
+    {"index": [{"name": "private", "url": "https://packages.example/simple", "explicit": True}],
+     "sources": {"registry-dependency": {"index": "private"}}},
+    {"index-url": "https://packages.example/simple", "extra-index-url": ["https://extra.example/simple"]},
+    {},
+])
+def test_build_version_preserves_index_policy_before_lock(tmp_path, monkeypatch, policy):
+    import tomlkit
+
+    directory = tmp_path / "project"
+    directory.mkdir()
+    config = {
+        "project": {"name": "factor-test", "version": "1.2.0", "requires-python": ">=3.12"},
+        "tool": {"uv": {**policy, "override-dependencies": ["do-not-copy==1"]}},
+    }
+    (directory / "pyproject.toml").write_text(tomlkit.dumps(config))
+    (directory / "uv.lock").write_text(tomlkit.dumps({"version": 1, "package": [
+        {"name": "factor-test", "version": "1.2.0", "source": {"editable": "."}},
+        {"name": "registry-dependency", "version": "2.0.0", "source": {"registry": "https://packages.example/simple"}},
+    ]}))
+    original = {name: (directory / name).read_bytes() for name in ["pyproject.toml", "uv.lock"]}
+    (tmp_path / "runs").mkdir()
+    monkeypatch.setenv("SOLO_SHARED_DIR", str(tmp_path))
+    monkeypatch.setattr(versions, "parameters", lambda *args: {
+        "entry": "factor_test:Factor", "factor": {}, "analysis": {},
+    })
+    locked = []
+
+    def command(arguments, cwd, payload=None):
+        if arguments[:2] == ["uv", "build"]:
+            wheels = Path(arguments[arguments.index("--out-dir") + 1])
+            (wheels / "factor_test-1.2.1-py3-none-any.whl").write_bytes(b"candidate")
+            return ""
+        if arguments[:2] == ["uv", "lock"]:
+            environment = Path(arguments[arguments.index("--project") + 1])
+            locked.append(tomllib.loads((environment / "pyproject.toml").read_text()))
+            (environment / "uv.lock").write_text('version = 1\npackage = []\n')
+            return ""
+        return json.dumps({"version": "1.2.0", "direct": {}})
+
+    monkeypatch.setattr(versions, "command", command)
+    versions.build_version(directory, {"id": str(uuid4()), "packageVersion": "1.2.1"}, {})
+    uv = locked[0]["tool"]["uv"]
+    expected_indexes = [dict(index) for index in policy.get("index", [])]
+    if "index-url" not in policy and not any(index.get("default") for index in expected_indexes):
+        expected_indexes.append({"url": "https://pypi.tuna.tsinghua.edu.cn/simple", "default": True})
+    assert uv.get("index", []) == expected_indexes
+    for name in ("index-url", "extra-index-url", "index-strategy"):
+        assert uv.get(name) == policy.get(name)
+    assert uv["sources"].get("registry-dependency") == policy.get("sources", {}).get("registry-dependency")
+    assert "override-dependencies" not in uv
+    assert uv["constraint-dependencies"] == ["registry-dependency==2.0.0"]
+    assert {name: (directory / name).read_bytes() for name in original} == original

@@ -14,14 +14,26 @@ interface Candidate {
   schemeVersion: string;
 }
 
-async function request<T>(path: string, projectId?: string, dev = true): Promise<T> {
+interface Artifact {
+  id: string;
+  package: string;
+  version: string;
+  kind: ProjectKind;
+  schemeVersion: string;
+  sourceProjectName: string | null;
+  sha256: string;
+}
+
+type Selection = { live_project_id: string } | { artifact_id: string };
+
+async function request<T>(path: string, selection?: Selection, dev = true): Promise<T> {
   const settings = ServerConnection.makeSettings();
   const url = URLExt.join(settings.baseUrl, 'solo', 'project', 'dependencies');
   const response = await ServerConnection.makeRequest(
-    projectId ? url : `${url}?${new URLSearchParams({ path })}`,
-    projectId ? {
+    selection ? url : `${url}?${new URLSearchParams({ path })}`,
+    selection ? {
       method: 'POST',
-      body: JSON.stringify({ path, project_id: projectId, dev }),
+      body: JSON.stringify({ path, ...selection, dev }),
       headers: { 'Content-Type': 'application/json' }
     } : {},
     settings
@@ -38,6 +50,8 @@ async function request<T>(path: string, projectId?: string, dev = true): Promise
 
 function Installer({ project }: { project: Project }): React.ReactElement {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [mode, setMode] = useState<'published' | 'source'>('published');
   const [selected, setSelected] = useState('');
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
@@ -49,26 +63,29 @@ function Installer({ project }: { project: Project }): React.ReactElement {
     let active = true;
     setLoading(true);
     setMessage('');
-    request<{ projects: Candidate[] }>(project.path).then(({ projects }) => {
+    request<{ projects: Candidate[]; artifacts: Artifact[] }>(project.path).then(({ projects, artifacts }) => {
       if (active) {
         setCandidates(projects);
-        setSelected(projects[0]?.id ?? '');
+        setArtifacts(artifacts);
+        setSelected(mode === 'published' ? artifacts[0]?.id ?? '' : projects[0]?.id ?? '');
       }
     }).catch((error: Error) => {
       if (active) {
         setCandidates([]);
+        setArtifacts([]);
         setSelected('');
         setMessage(error.message);
       }
     }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [project.path, refresh]);
+  }, [project.path, refresh, mode]);
 
   async function install(): Promise<void> {
     setInstalling(true);
     setMessage('正在使用 uv 安装…');
     try {
-      const result = await request<{ package: string }>(project.path, selected, dev);
+      const selection: Selection = mode === 'published' ? { artifact_id: selected } : { live_project_id: selected };
+      const result = await request<{ package: string }>(project.path, selection, dev);
       setMessage(`已将 ${result.package} 安装为${dev ? '研究依赖（dev）' : '运行依赖'}。已加载该包的 Kernel 需重启后使用新代码。`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
@@ -77,23 +94,36 @@ function Installer({ project }: { project: Project }): React.ReactElement {
     }
   }
 
+  const count = mode === 'published' ? artifacts.length : candidates.length;
   return <>
-    <Select key={loading ? 'loading' : candidates.length ? 'projects' : 'empty'}
-      aria-label="已有项目" value={selected} disabled={loading || installing || !candidates.length}
+    <Select aria-label="依赖来源" value={mode} disabled={installing}
+      onChange={(event) => { setSelected(''); setMode((event.target as HTMLSelectElement).value as 'published' | 'source'); }}>
+      <Option value="published">已发布版本（固定内容）</Option>
+      <Option value="source">源码项目（开发构建）</Option>
+    </Select>
+    <Select key={`${mode}:${loading ? 'loading' : count ? 'available' : 'empty'}`}
+      aria-label={mode === 'published' ? '已发布版本' : '源码项目'} value={selected} disabled={loading || installing || !count}
       onChange={(event) => setSelected((event.target as HTMLSelectElement).value)}>
-      {candidates.length ? candidates.map((candidate) =>
+      {count ? mode === 'published' ? artifacts.map((artifact) =>
+        <Option key={artifact.id} value={artifact.id}>
+          {kinds[artifact.kind]} / {artifact.sourceProjectName ?? artifact.package} · {artifact.version} · {artifact.sha256.slice(0, 8)}
+        </Option>
+      ) : candidates.map((candidate) =>
         <Option key={candidate.id} value={candidate.id}>
           {kinds[candidate.kind]} / {candidate.name} · Scheme {candidate.schemeVersion}
         </Option>
-      ) : <Option value="">{loading ? '正在读取项目…' : '没有兼容的同类或上游项目'}</Option>}
+      ) : <Option value="">{loading ? '正在读取列表…' : '没有兼容的同类或上游依赖'}</Option>}
     </Select>
+    <p className="solo-project-message">
+      {mode === 'published' ? '安装确切发布 wheel 与依赖闭包；原项目删除后仍可使用。' : '构建当前源码并冻结为 wheel，不保持源码目录链接。'}
+    </p>
     <Checkbox checked={dev} disabled={installing}
       onChange={(event) => setDev((event.target as HTMLInputElement).checked)}>
       仅用于研究（dev，不随算法包安装）
     </Checkbox>
     <div className="solo-project-actions">
       <Button appearance="accent" disabled={loading || installing || !selected} onClick={() => void install()}>
-        {installing ? '安装中…' : '安装项目'}
+        {installing ? '安装中…' : mode === 'published' ? '安装发布版本' : '构建并安装项目'}
       </Button>
       <Button disabled={loading || installing} onClick={() => setRefresh((value) => value + 1)}>刷新列表</Button>
     </div>

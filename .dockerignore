@@ -3,6 +3,7 @@
 !requirements-code-check.txt
 !requirements-ai.txt
 !requirements-dolphindb.txt
+!uv.toml
 !codex/
 !codex/package.json
 !codex/package-lock.json

@@ -6,6 +6,7 @@ from typing import Any
 from uuid import UUID
 
 from jupyter_server.base.handlers import APIHandler
+from packaging.utils import canonicalize_name
 from tornado import web
 
 KINDS = {"factor", "model", "optimize", "control", "execution"}
@@ -37,6 +38,11 @@ def read_project(root: Path, path: str) -> dict[str, Any] | None:
                     raise ValueError("Invalid name")
                 if metadata["kind"] not in KINDS:
                     raise ValueError("Invalid kind")
+                package_name = metadata.get("package_name")
+                if package_name is not None:
+                    if not isinstance(package_name, str):
+                        raise ValueError("Invalid package name")
+                    package_name = canonicalize_name(package_name, validate=True)
                 fields = ("scheme_version", "scheme_commit", "algo_version", "algo_commit")
                 versions = {field: metadata.get(field) for field in fields}
                 if any(value is not None and not isinstance(value, str) for value in versions.values()):
@@ -48,6 +54,7 @@ def read_project(root: Path, path: str) -> dict[str, Any] | None:
                 "project_id": metadata["project_id"],
                 "name": metadata["name"],
                 "kind": metadata["kind"],
+                "package_name": package_name,
                 **versions,
             }
         if current == root:

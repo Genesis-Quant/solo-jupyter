@@ -19,6 +19,7 @@ import {
 
 import { ProjectDetails } from './panel';
 import { ProjectDependencies } from './dependencies';
+import { bindProjectKernel } from './kernel';
 import { ProjectContext } from './project';
 import { IProjectContext } from './tokens';
 import '../style/index.css';
@@ -153,6 +154,22 @@ const plugin: JupyterFrontEndPlugin<IProjectContext> = {
       }
     });
     void app.restored.then(() => context.setPath(shell.currentPath ?? browser.model.path));
+
+    const bound = new WeakSet<object>();
+    const bindKernels = (): void => {
+      for (const widget of shell.widgets('main')) {
+        const document = documents.contextForWidget(widget);
+        if (!document || bound.has(document) || PathExt.extname(document.path) !== '.ipynb') {
+          continue;
+        }
+        bound.add(document);
+        void bindProjectKernel(app, document.sessionContext, document.path).catch(error =>
+          showErrorMessage('无法切换到项目 Kernel', error instanceof Error ? error : String(error))
+        );
+      }
+    };
+    shell.layoutModified.connect(bindKernels);
+    void app.restored.then(bindKernels);
     return context;
   }
 };
