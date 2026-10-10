@@ -1,8 +1,9 @@
 ARG NOTEBOOK_IMAGE=quay.io/jupyter/scipy-notebook:latest
 FROM node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS codex-runtime
 
+ENV npm_config_registry=https://registry.npmmirror.com
 WORKDIR /opt/jupyter-codex
-COPY codex/package.json codex/package-lock.json ./
+COPY codex/package.json codex/package-lock.json codex/.npmrc ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
 FROM ${NOTEBOOK_IMAGE} AS solo-extension
@@ -10,9 +11,11 @@ USER root
 COPY --from=codex-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=codex-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
-ENV PATH="/usr/local/bin:${PATH}"
+ENV PATH="/usr/local/bin:${PATH}" \
+    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    npm_config_registry=https://registry.npmmirror.com
 WORKDIR /opt/solo-extension
-COPY extension/package.json extension/package-lock.json ./
+COPY extension/package.json extension/package-lock.json extension/.npmrc ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY extension/ ./
 RUN npm run build -- --core-package-file "$(python -c 'from pathlib import Path; import jupyterlab; print(Path(jupyterlab.__file__).parent / "staging" / "package.json")')" \
@@ -20,9 +23,15 @@ RUN npm run build -- --core-package-file "$(python -c 'from pathlib import Path;
 
 FROM ${NOTEBOOK_IMAGE}
 
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+    npm_config_registry=https://registry.npmmirror.com \
+    UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
+    UV_PYTHON_INSTALL_MIRROR=https://registry.npmmirror.com/-/binary/python-build-standalone
 USER root
 
-RUN apt-get update \
+RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ubuntu|g' \
+        -e 's|http://security.ubuntu.com/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         fonts-noto-cjk \
         pandoc \
@@ -45,6 +54,9 @@ RUN python -B -c 'import importlib.metadata as m; print("\n".join(sorted(d.metad
         --requirement /tmp/requirements-ai.txt \
     && python -m pip check \
     && rm /tmp/requirements-existing.txt
+
+COPY scripts/patch_mcp_uuid.py /tmp/patch_mcp_uuid.py
+RUN python -B /tmp/patch_mcp_uuid.py
 
 COPY --from=codex-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=codex-runtime /opt/jupyter-codex /opt/jupyter-codex
@@ -73,9 +85,9 @@ RUN python -B -c 'import importlib.metadata as m; print("\n".join(sorted(d.metad
 
 USER root
 RUN printf '%s\n' \
-        'deb https://archive.ubuntu.com/ubuntu noble main' \
-        'deb https://archive.ubuntu.com/ubuntu noble-updates main' \
-        'deb https://security.ubuntu.com/ubuntu noble-security main' \
+        'deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu noble main' \
+        'deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu noble-updates main' \
+        'deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu noble-security main' \
         > /tmp/keyring-apt.list \
     && apt-get -o Dir::Etc::sourcelist=/tmp/keyring-apt.list -o Dir::Etc::sourceparts=- \
         -o Acquire::https::Timeout=20 -o Acquire::Retries=1 update \
@@ -101,3 +113,4 @@ RUN python -m pip install --no-cache-dir --index-url https://pypi.tuna.tsinghua.
     && python -m pip check
 
 COPY uv.toml /etc/uv/uv.toml
+COPY solo_report_bridge.py /etc/ipython/solo_report_bridge.py

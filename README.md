@@ -13,6 +13,35 @@ Solo 本地部署使用父目录的 `docker-compose.yml`，在父目录执行 `d
 主题、图标、命令与文件打开均使用 Jupyter 原生能力。CSS 只设置间距和滚动。
 服务端提供需登录的 `GET <base_url>/solo/project?path=<相对路径>`，读取项目描述，不开放隐藏文件通用读取。
 
+### 文件读取和下载
+
+Solo Server Extension 在 Jupyter 启动时同时注册文件后端，与 Jupyter 共用进程、端口、登录 Cookie/token 和 Contents 授权，不需要额外启动服务：
+
+- 读取原始文件：`GET <base_url>/solo/files/<工作区相对路径>`。
+- 下载文件：同一 URL 加 `?download=1`；中文文件名按标准编码，Notebook 文件默认作为附件。
+- `HEAD` 和 HTTP `Range` 沿用 Jupyter/Tornado 的文件传输实现，可读取 JSON、Parquet、源码或其他普通文件，不要求运行成功或存在报告清单。
+- 目录浏览继续使用 Jupyter 自带的 `/api/contents`，文件接口不生成目录列表，不提供写入、删除或执行操作。
+
+“所有文件”指 `ServerApp.root_dir` 内的文件。Solo 主部署的根目录是 `/shared`，因此可以读取 `projects/...` 和 `runs/...`，不是容器根目录或宿主全盘。路径按 URL 分段编码；拒绝 `..`、绝对路径、反斜杠、盘符和逃出工作区的符号链接。隐藏文件及指向隐藏目标的链接遵循当前 ContentsManager 的 `allow_hidden` 设置；文件接口不另行启用隐藏访问，也不扩大到凭据目录或打开全局跨域访问。
+
+例如，报告保存到 `/shared/projects/factor/Test/reports/<id>/information_coefficient.parquet` 后，读取地址为：
+
+```text
+http://127.0.0.1:8888/solo/files/projects/factor/Test/reports/<id>/information_coefficient.parquet
+```
+
+iframe 应传浏览器可访问的页面 URL；文件 URL 中不放登录 token。页面读取数据仍须满足 Jupyter 的登录、Origin/Referer 和授权检查，跨端口不能仅凭 Cookie 假定能够读取。HTML/SVG 原始文件保留 Jupyter 的 sandbox CSP；这个文件后端本身不会把旧 Scheme `srcdoc` 报告转换成前端 URL，也不会修复旧独立 HTML 的 DuckDB 扩展加载。
+
+Jupyter 原生 `/files/<工作区相对路径>` 和 `?download=1` 已提供相同的文件传输基础。新 `/solo/files` 路由在更新扩展后的下一次 Server 启动生效；仅安装 wheel 或刷新浏览器不会热加载路由。已有活跃 Kernel 时不为此重启、清空工作区或重新执行 Notebook。
+
+### Notebook 报告 URL
+
+`ipython_config.py` 在项目 Kernel 启动时加载 `/etc/ipython/solo_report_bridge.py`，注册 `solo_report_display`。该桥接只在 Kernel 内存中把已安装 Scheme 的 `Report.show()` 接到 URL 展示，不改项目源码、依赖、锁文件或旧 wheel；`to_html()`、`save()` 和 `preview()` 保持原行为。
+
+`report.show()` 将已计算的 DataFrame 保存到当前项目 `reports/<uuid>/`，写入一个带 Scheme 版本、文件名和显示参数的 `report.json`，然后输出 `iframe src="<前端>/embed/report?source=jupyter&path=..."`。不会重新运行研究，不嵌入脚本、Worker、WASM、Parquet 或登录 token；每次保存使用独立目录，不覆盖历史运行报告。前端按同源 `/jupyter/solo/files/...` 读取 JSON 和 Parquet，经过固定目标代理复用 Jupyter 登录 Cookie 和 XSRF 校验，无服务端 token 注入或全局 CORS 放行。
+
+`SOLO_REPORT_FRONTEND_URL` 必须是浏览器可访问的 HTTP(S) 前端地址，默认 `http://127.0.0.1:5174`，不能包含凭据、查询参数或片段。浏览器应使用与 `SOLO_JUPYTER_BROWSER_URL` 相同的主机名登录 Jupyter；生产部署同样需把前端的 `/jupyter` 反向代理到受认证的 Jupyter 服务。新 Kernel 自动加载桥接，已打开的 Kernel 不会被自动重启或执行。
+
 “安装已有项目”从 Solo 后端读取未归档且未退役的项目，仅列出当前类型及其上游类型、且 Scheme 主版本和次版本相同的其他项目，补丁版本不必相同。1.2.0 与 1.2.7 可双向安装，1.1.x、1.3.x 不混用；安装接口也执行同一校验，不能绕过候选列表。项目包的实际版本须属于同一系列，并声明整个系列的依赖范围，如 `scheme>=1.2.0,<1.3.0`。类型顺序为 factor → model → optimize → control → execution；同类项目可以相互选择，自身不能安装。
 
 安装前由 Backend 中央政策检查当前项目、候选项目和递归本地运行时依赖的发布来源。对方已保存的源码及其必要本地依赖先构建为 wheel，保存至当前项目的 `.solo-wheels/<包名>/<SHA256>/<文件名>`；不递归上游开发依赖，不传递上游 `tool.uv.sources.scheme`。运行时 extras 按 PEP 685 规范化，`gpu_fast`、`gpu-fast` 等等价拼写使用同一来源选择与递归准入。wheel 的原始 `Requires-Dist` 保留，正常解析所有直接和传递依赖的交集，不创建 Scheme override，也不改写依赖要求来掩盖冲突；已有 Scheme override 必须先移除并验证环境。
@@ -36,7 +65,7 @@ Model 选择默认后续算法，Optimize、Control、Execution 从已安装项�
 ```bash
 npm ci
 npm run build
-python -m pip install --no-deps .
+python -m pip install --index-url https://pypi.tuna.tsinghua.edu.cn/simple --no-deps .
 jupyter labextension list
 jupyter server extension list
 ```
@@ -156,7 +185,9 @@ jupyter nbconvert --to pdf "你的文件.ipynb"
 
 ## uv
 
-镜像通过[官方 PyPI 安装方式](https://docs.astral.sh/uv/getting-started/installation/#pypi)预置 uv 0.12.10 和 uvx，命令位于 `/opt/conda/bin`。版本固定在 `Dockerfile` 中，容器重建后仍可使用。
+镜像通过[官方 PyPI 安装方式](https://docs.astral.sh/uv/getting-started/installation/#pypi)，从清华 PyPI 镜像预置 uv 0.12.10 和 uvx，命令位于 `/opt/conda/bin`。版本固定在 `Dockerfile` 中，容器重建后仍可使用。
+
+构建时 pip / uv 默认使用 `https://pypi.tuna.tsinghua.edu.cn/simple`，APT 使用清华 Ubuntu 镜像；Codex 和插件的 `.npmrc` 将 npm 源设为 `https://registry.npmmirror.com`，本地 `npm ci` 也沿用此源。`uv.toml` 保留硬链接模式与清华默认索引，并将 uv 管理的 Python 下载源设为 `https://registry.npmmirror.com/-/binary/python-build-standalone`；容器中该配置位于 `/etc/uv/uv.toml`。基础镜像仍使用原始 Quay / Docker Hub 名称，仓库不替换为未经验证的镜像副本。
 
 在 JupyterLab 的终端中可以直接执行：
 
@@ -176,6 +207,8 @@ uv venv --python /opt/conda/bin/python .venv
 镜像预置 Jupyter AI 3.2.0、Codex CLI 0.153.4 和 `@agentclientprotocol/codex-acp` 1.10.0，在 JupyterLab 的 Chat 界面中使用 Codex 读取和编辑文件、执行命令以及处理 Notebook。
 
 Python 新增依赖固定在 `requirements-ai.txt`；构建时约束已有包的版本。Codex 的 npm 依赖固定在 `codex/package.json` 和 `codex/package-lock.json`，使用 Node.js 24.20.0，运行组件随镜像安装。
+
+`jupyterlab-commands-toolkit==0.2.0` 的前端在模块顶层直接调用 `crypto.randomUUID()`；部分浏览器或非安全上下文没有该方法，导致模块初始化失败，MCP 命令没有前端接收者。镜像安装 AI 依赖后运行 `scripts/patch_mcp_uuid.py`，校验固定版本和原始资产 SHA256 后改用已绑定的 `@lumino/coreutils.UUID.uuid4()`。补丁不增加全局 crypto polyfill，不调整认证或权限；保留原始资产，新 chunk 和 remote entry 使用内容哈希文件名并同步更新加载清单，刷新页面即可加载修复，不需要重启 Server/Kernel。未来升级工具包若资产不同，构建会明确失败，必须重新验证补丁，不能静默替换未知版本。
 
 首次使用时，打开 JupyterLab 的终端，执行：
 

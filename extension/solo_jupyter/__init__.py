@@ -7,6 +7,7 @@ from jupyter_server.serverapp import ServerApp
 from jupyter_server.utils import url_path_join
 
 from .dependencies import DependenciesHandler, ProjectOperationsHandler, RecoveringProjectHandler, start_installation_recovery
+from .files import FilesHandler
 from .versions import VersionsHandler
 
 
@@ -22,6 +23,8 @@ def _load_jupyter_server_extension(server_app: ServerApp) -> None:
         (route + "/dependencies", DependenciesHandler),
         (route + "/versions", VersionsHandler),
         (route + "/operations", ProjectOperationsHandler),
+        (url_path_join(web_app.settings["base_url"], "solo", "files", "(.*)"),
+         FilesHandler, {"path": str(Path(server_app.root_dir).resolve())}),
     ])
     if "solo_installation_recovery" not in web_app.settings:
         web_app.settings["solo_installation_recovery"] = start_installation_recovery(Path(server_app.root_dir))

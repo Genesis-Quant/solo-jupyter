@@ -33,6 +33,8 @@ services:
       NB_GID: "100"
       CHOWN_HOME: "yes"
       CHOWN_HOME_OPTS: "-R"
+      SOLO_SHARED_DIR: /home/jovyan/work
+      SOLO_REPORT_FRONTEND_URL: ${SOLO_REPORT_FRONTEND_URL:-http://127.0.0.1:5174}
       JUPYTER_TOKEN: ${JUPYTER_TOKEN:?Set JUPYTER_TOKEN in .env}
       JUPYTER_KEYRING_PASSWORD: ${JUPYTER_KEYRING_PASSWORD:?Set JUPYTER_KEYRING_PASSWORD in .env}
       HTTP_PROXY: http://metacubexd:7891
@@ -52,6 +54,7 @@ services:
       - codex-home:/home/jovyan/.codex
       - ./config/nbconvert/templates/latex:/home/jovyan/.local/share/jupyter/nbconvert/templates/latex
       - ./ipython_config.py:/etc/ipython/ipython_config.py:ro
+      - ./solo_report_bridge.py:/etc/ipython/solo_report_bridge.py:ro
     networks:
       - 1panel-network
 
