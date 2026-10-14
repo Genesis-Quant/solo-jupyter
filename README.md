@@ -222,6 +222,52 @@ Codex 的配置、登录信息和会话保存在 Docker 命名卷 `codex-home`�
 
 使用说明：[Jupyter AI](https://jupyter-ai.readthedocs.io/en/latest/getting-started.html)、[Codex 登录](https://learn.chatgpt.com/docs/auth)。
 
+### 内置研究 skills
+
+`codex/skills/` 随镜像安装到 `/etc/codex/skills/`，由 Codex 系统配置层发现（`admin` scope），不写入或覆盖持久化的 `~/.codex` 登录、配置、会话与用户 skills。不是把自定义内容放进会被 Codex 更新重建的 `~/.codex/skills/.system` 缓存。
+
+| Skill | 用途 |
+| --- | --- |
+| `dsl` | Runtime JSON DSL、算符和基础字段发现、BOOL/on/filters、离线校验 |
+| `data-query` | 行情和基础数据查询、Universe 两阶段动态池、日期与会话边界 |
+| `factor-analysis` | Factor/Params/Form、收益标签、IC/分组/换手与 Arena 口径比较 |
+| `dolphindb` | DolphinScript、部署版本、函数签名、类型/schema 与有界诊断 |
+| `backtest` | Python Algo 四环节、回调/订单/持仓、回测数据与结果审计 |
+
+内容参考 Arena MCP 文档并按 Solo 实际接口适配。默认使用项目锁定的 Runtime JSON、`Universe.member` 和 Python Algo，不把 Arena 双源码、DolphinScript callbacks 或未连接的 MCP 工具当作本地接口。主指引按主题触发，详细契约在各 skill 的 `references/` 按需读取，不把整套文档自动塞入每轮上下文。
+
+在 Jupyter AI 的 Codex 聊天中可使用 `/skills` 查看技能，也可明确说“使用 `$dsl` 检查当前因子”或“使用 `$backtest` 检查回调”。ACP 会在新建/恢复会话以及处理普通提示前刷新 skills；如果界面仍保留旧列表，新开 Codex 聊天即可，不必重启 Notebook Kernel。
+
+DSL skill 提供本地脚本，始终用研究项目的解释器运行：
+
+```bash
+.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py version
+.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py operators --search pct_change
+.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py describe unary.pct_change
+.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py validate request.json
+```
+
+它读取已安装 Runtime 的注册表和 Pydantic 模型，校验依赖字段白名单，不连接数据库、不计算数据或安装依赖；不会加载 `.env`。字段目录和校验结果的 `configuration` 说明指数配置来源：显式 `--index-codes`（放在子命令前）优先于已导出的 `INDEX_CODES`，未提供时只列出 Runtime 默认配置并警告。默认配置不等于项目 `.env`，此时权重字段校验返回 `index_configuration_required`，不再误判为未知字段；静态字段仍可校验。
+
+项目若仅在 `.env` 中设置指数，用已确认的非敏感配置显式传入，不需要加载或导出密码。例如项目实际配置为 `123456.SH` 时：
+
+```bash
+.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py --index-codes '123456.SH' factors
+.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py --index-codes '123456.SH' validate request.json
+```
+
+参数必须与运行项目的有效配置一致，不应仅为通过校验添加请求中的指数；空字符串表示明确没有配置指数。helper 按 Runtime 的映射函数更新权重字段，其余基础字段和算符仍来自已安装版本。算符通用 JSON Schema 不包含所有具体规则，实际验证使用 `FactorQuery.model_validate`。本地校验通过不等于数据完整或回测成功。
+
+回归测试和真实 Codex 发现检查：
+
+```bash
+python -m pytest -q -p no:cacheprovider tests/test_codex_skills.py tests/test_codex_dsl.py
+# 构建后的 Jupyter 容器内：
+python /opt/jupyter-codex/check_skills.py --cwd /shared/projects
+```
+
+DSL 测试需要已安装 `arena-runtime` 的项目 Python；没有该包时相关用例明确跳过。发现检查只调用 Codex 本地 `initialize` 和 `skills/list`，使用临时 `HOME/CODEX_HOME`，不发送模型请求、不读取真实登录或聊天记录。要证明无外部网络，放在 `docker run --network none` 的隔离容器执行；临时目录不等于网络隔离。
+
 ## Python 代码检查
 
 镜像通过 `requirements-code-check.txt` 固定 `jupyterlab-lsp`、`jupyter-lsp`、`python-lsp-server`、`python-lsp-ruff` 和 `ruff`。检查设置保存在 `config/lab/user-settings/@jupyter-lsp/jupyterlab-lsp/plugin.jupyterlab-settings`，优先使用 `pylsp`，由 Ruff 提供检查并关闭重复的检查器。
