@@ -112,7 +112,7 @@ def test_factor_skill_examples_use_max_lag_and_document_segment_boundaries():
         assert "max_lag" in text
         assert "r0o" in text and "r1o" in text and "r2" in text
         assert "simple" in text and "隔夜" in text and "日内" in text
-        assert "[start,end)" in text and "NULL" in text
+        assert "[start,end]" in text and "NULL" in text
         assert "close-to-close累计收益" in text
         assert "历史报告" in text or "篡改历史" in text
         for source in re.findall(r"^```python\s*\n(.*?)^```", text, re.M | re.S):
@@ -120,6 +120,9 @@ def test_factor_skill_examples_use_max_lag_and_document_segment_boundaries():
             assert not any(isinstance(node, ast.keyword) and node.arg == "return_periods" for node in ast.walk(tree))
     contract = (directory / "references/factor-contract.md").read_text(encoding="utf-8")
     assert "max_lag=2" in contract
+    assert "end + timedelta(days=1)" in contract
+    assert "factor.validate(start,end,n_sample=5)" in contract
+    assert "compute(d,d)" in contract
     assert "params.return_columns" in contract and "params.return_specs" in contract
     for field in ("kind", "periods", "lag", "session", "turnover_period"):
         assert field in contract

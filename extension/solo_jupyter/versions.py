@@ -41,13 +41,15 @@ async def backend(path: str, body: dict | None = None) -> dict | list:
         raise web.HTTPError(error.code if error.code < 600 else 502, reason=str(message)) from error
 
 
-def command(arguments: list[str], directory: Path, payload: dict | None = None) -> str:
+def command(
+    arguments: list[str], directory: Path, payload: dict | None = None, *, timeout: float | None = 600,
+) -> str:
     environment = {**os.environ, **uv_environment(directory), "GIT_TERMINAL_PROMPT": "0"}
     for name in ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME", "UV_PROJECT_ENVIRONMENT"):
         environment.pop(name, None)
     result = subprocess.run(arguments, cwd=directory, env=environment,
                             input=json.dumps(payload) if payload is not None else None,
-                            text=True, capture_output=True, timeout=600, check=False)
+                            text=True, capture_output=True, timeout=timeout, check=False)
     if result.returncode:
         message = (result.stderr or result.stdout)[-6000:]
         for key, value in os.environ.items():
@@ -57,11 +59,17 @@ def command(arguments: list[str], directory: Path, payload: dict | None = None) 
     return result.stdout
 
 
-def parameters(directory: Path, values: dict | None = None, source: Path | None = None) -> dict:
+def parameters(
+    directory: Path, values: dict | None = None, source: Path | None = None, *,
+    validate_factor: bool = False,
+) -> dict:
     arguments = [str(directory / ".venv/bin/scheme"), "parameters", "--project", str(source or directory)]
     if values is not None:
         arguments.append("--validate")
-    output = command(arguments, directory, values)
+    if validate_factor:
+        arguments.append("--validate-factor")
+    # 保存时可能执行完整区间和多个单日计算，不为用户的因子计算设置固定时限。
+    output = command(arguments, directory, values, timeout=None if validate_factor else 600)
     return json.loads(output.splitlines()[-1])
 
 
@@ -89,7 +97,9 @@ def copy_source(source: Path, destination: Path) -> None:
     shutil.copytree(source / "src", destination / "src")
 
 
-def build_version(directory: Path, version: dict, values: dict) -> None:
+def build_version(
+    directory: Path, version: dict, values: dict, *, validate_factor: bool = False,
+) -> None:
     target = Path(os.environ.get("SOLO_SHARED_DIR", "/shared")) / "runs" / version["id"]
     target.mkdir(exist_ok=False)
     source = target / "source"
@@ -97,7 +107,7 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
     config = tomlkit.parse((source / "pyproject.toml").read_text())
     config["project"]["version"] = version["packageVersion"]
     (source / "pyproject.toml").write_text(tomlkit.dumps(config))
-    parameters_result = parameters(directory, values, source)
+    parameters_result = parameters(directory, values, source, validate_factor=validate_factor)
     wheels = target / "wheels"
     wheels.mkdir()
     command(["uv", "build", "--wheel", "--out-dir", str(wheels), str(source)], target)
@@ -188,9 +198,9 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
     (target / "build.json").write_text(json.dumps({"scheme_version": installed["version"]}))
 
 
-async def _project_thread(function, *arguments):
+async def _project_thread(function, *arguments, **keywords):
     """请求取消也等待已开始的源码读取结束，再释放项目排他入口。"""
-    task = asyncio.create_task(asyncio.to_thread(function, *arguments))
+    task = asyncio.create_task(asyncio.to_thread(function, *arguments, **keywords))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
@@ -204,7 +214,9 @@ async def _save(directory: Path, project: dict, version: dict, values: dict) -> 
     endpoint = f'{project["project_id"]}/versions/{version["id"]}/submit'
     try:
         await check_project_release(project["project_id"])
-        await _project_thread(build_version, directory, version, values)
+        await _project_thread(
+            build_version, directory, version, values, validate_factor=project["kind"] == "factor",
+        )
     except (OSError, ValueError, KeyError, StopIteration, subprocess.SubprocessError, web.HTTPError) as error:
         message = error.reason if isinstance(error, web.HTTPError) else str(error)
         await backend(endpoint, {"error": message[-10000:]})

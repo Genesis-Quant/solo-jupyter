@@ -4,7 +4,7 @@
 
 ## 源码结构
 
-项目导出 `Factor`、`FactorParams`、`FactorAnalysisParams`、`FactorReportForm`。Params从 `scheme.base.FactorParams` 继承基础日期/Universe；AnalysisParams同时继承项目Params与Scheme分析Params；表单绑定具体项目AnalysisParams。
+项目导出 `Factor`、`FactorParams`、`FactorAnalysisParams`、`FactorReportForm`。Params从 `scheme.base.FactorParams` 继承Universe，不保存 `start/end`；AnalysisParams同时继承项目Params与Scheme分析Params，由分析参数保存日期并传给 `compute`；表单绑定具体项目AnalysisParams。以下示例使用闭区间 `[start,end]` 的新接口，旧环境不自动改写日期语义。
 
 ```python
 from datetime import date, timedelta
@@ -33,6 +33,8 @@ class FactorReportForm(BaseForm[FactorAnalysisParams]):
 
 class Factor(BaseFactor[FactorParams]):
     def compute(self, start: date, end: date) -> pd.DataFrame:
+        if start > end:
+            raise ValueError("因子日期区间必须满足 start <= end")
         derivatives = {
             "momentum": {
                 "type": "TS",
@@ -42,7 +44,7 @@ class Factor(BaseFactor[FactorParams]):
             }
         }
         with self.params.universe.query(
-            start, end,
+            start, end + timedelta(days=1),
             lookback=timedelta(days=max(90, self.params.periods * 4)),
             derivatives=derivatives,
             filters=[Universe.member],
@@ -82,13 +84,17 @@ report = params.run(Factor)
 - `r{k-1}o(t)=O_adj(t+k)/C_adj(t+k-1)-1`，前一交易日的复权收盘价到下一交易日的复权开盘价的隔夜simple收益。
 - `r{k}(t)=C_adj(t+k)/O_adj(t+k)-1`，同一交易日开盘到收盘的日内simple收益。
 
-各列都是单段收益，绝非close-to-close累计收益或log收益。`max_lag=2` 涉及 `t,t+1,t+2` 三个交易日，`params.return_columns` 按序为 `r0o,r1,r1o,r2`；默认1仅输出 `r0o,r1`。行情始终限定在 `[start,end)`，尾部不可用的k对应列为NULL，较早k仍可有效；不延长读取或补0。
+各列都是单段收益，绝非close-to-close累计收益或log收益。`max_lag=2` 涉及 `t,t+1,t+2` 三个交易日，`params.return_columns` 按序为 `r0o,r1,r1o,r2`；默认1仅输出 `r0o,r1`。行情限定在闭区间 `[start,end]`，包含end但不读取end之后的价格；尾部不可用的k对应列为NULL，较早k仍可有效；不延长读取或补0。
 
 `params.return_specs` 是按收益列名索引的dict，每项包含 `kind="simple"`、`periods=1`、标签数字 `lag`、`session="overnight"|"intraday"` 和 `turnover_period=k`。例如 `r1o` 的lag为1、turnover_period为2；`r2` 的lag为2、turnover_period也为2。`periods=1` 表示单段，不以lag代替持有期。
 
 桥接依据对象的 `max_lag` 构造相同元数据，不依赖导入新版Scheme。只有 `return_periods` 的旧对象仍输出原 `return_N` 和 `{"kind": "simple", "periods": N}`，不误转换成新标签、不改旧环境或历史报告。因子实现和手写分组逻辑不因此新增预处理。
 
 ## 返回与校验
+
+`factor.validate(start,end,n_sample=5)` 计算一次完整闭区间因子表，从输出的唯一日期无放回抽样，逐日原样调用 `compute(d,d)`。全部证券、列和NULL位置必须匹配，数值使用 `rtol=1e-7, atol=1e-10`，行列排列不同可以对齐；日期少于样本数时全部检查。通过返回 `None`，不一致抛出含日期的错误，空表或重复索引不能通过。不要把抽样通过说成穷尽证明。
+
+Jupyter 保存时只在冻结源码阶段自动调用一次；打开表单、普通参数校验、正式任务及重试提交不重复运行。校验失败会阻断提交，不生成报告来冒充验证。旧Schema或旧compute尚未迁移时明确报错，不静默跳过。
 
 FactorAnalysisResult字段：
 

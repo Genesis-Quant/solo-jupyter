@@ -22,7 +22,7 @@ r{k}(t)   = C_adj(t+k) / O_adj(t+k) - 1    # intraday
 
 默认 `max_lag=1` 仅有 `r0o,r1`。`params.return_columns` 提供上述顺序；`params.return_specs` 每项均为 `kind="simple"`、`periods=1`，加上表中的lag、session和turnover_period。标签数字是lag，不能把它当成累计持有期。
 
-`[start,end)` 的行情截止到 `end-1日`，不读取end及其后的数据。尾部某个k不可用时，其对应两列为NULL，较早k仍可能有效。例如只剩 `t,t+1` 时，`r0o/r1` 可有效而 `r1o/r2` 为NULL；最后一个交易日的未来标签全部为NULL。不要将NULL填0用于IC、均值、胜率或分组收益；这些行仍可保留因子值、分组和适用的换手信息。
+新因子接口采用闭区间 `[start,end]`，行情包含end当天，但不读取end之后的数据；旧项目及其报告仍按各自安装版本的区间解释。尾部某个k不可用时，其对应两列为NULL，较早k仍可能有效。例如只剩 `t,t+1` 时，`r0o/r1` 可有效而 `r1o/r2` 为NULL；最后一个交易日的未来标签全部为NULL。不要将NULL填0用于IC、均值、胜率或分组收益；这些行仍可保留因子值、分组和适用的换手信息。
 
 旧版只含 `return_periods` 的参数和报告继续使用 `return_N(t)=C_adj(t+N)/C_adj(t)-1` 及原规格；桥接不将它们转换为新标签，不升级旧环境或篡改历史。
 

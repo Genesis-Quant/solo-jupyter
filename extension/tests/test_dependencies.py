@@ -894,7 +894,7 @@ def test_real_uv_freeze_build_version_keeps_shared_scheme_and_persistent_wheels(
     target = root / "runs"
     target.mkdir()
     monkeypatch.setenv("SOLO_SHARED_DIR", str(root))
-    monkeypatch.setattr(versions, "parameters", lambda *args: {
+    monkeypatch.setattr(versions, "parameters", lambda *args, **kwargs: {
         "entry": "current_package:Model", "project_kind": "model", "backtest": {},
         "upstream": {"factor": {"package": "source-package", "version": "1.2.7", "entry": "source_package:Factor"}},
     })
@@ -1721,7 +1721,7 @@ def test_real_uv_save_snapshot_after_published_origin_deleted_is_self_contained(
     asyncio.run(dependencies.install_artifact(root, current, snapshot))
     (root / "runs").mkdir()
     monkeypatch.setenv("SOLO_SHARED_DIR", str(root))
-    monkeypatch.setattr(versions, "parameters", lambda *args: {
+    monkeypatch.setattr(versions, "parameters", lambda *args, **kwargs: {
         "entry": "current_package:Model", "project_kind": "model", "backtest": {},
         "upstream": {"factor": {"package": "source-package", "version": "1.2.7", "entry": "source_package:Factor"}},
     })

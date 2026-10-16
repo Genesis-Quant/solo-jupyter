@@ -56,6 +56,8 @@ Jupyter 原生 `/files/<工作区相对路径>` 和 `?download=1` 已提供相�
 五类项目均支持填写研究参数后保存版本。表单由 Scheme 对应的 ReportForm 生成；
 Model 选择默认后续算法，Optimize、Control、Execution 从已安装项目中选择上游，补齐后续默认环节。
 保存时仅复制 `pyproject.toml`、`uv.lock`、清单引用的 readme/license 和 `src`；`src` 内链接按普通复制跟随，不复制研究数据、Notebook 或环境。冻结当前包及上游包，按实际项目类型提交 factor、model、optimize、control 或 execution 工作流；后三类和 model 当前均展示完整回测报告。打开参数面板、验证和保存前检查中央准入，后台构建开始前再次检查；退役项目保留源码、Notebook 与历史版本查看，但不能新保存或安装为上游。
+因子版本在冻结源码之后、构建 wheel 之前调用一次 `scheme parameters --validate --validate-factor`。Scheme 用分析参数的闭区间 `[start,end]` 先计算完整因子表，再默认抽取最多 5 个不同日期调用 `compute(d,d)` 对照；全部一致才继续构建并提交，失败沿用构建失败回调。`factor.params` 不再保存日期，日期只在 `analysis` 中。打开表单、保存前的普通 `--validate` 及 `validate_only` 不运行计算；正式任务和“重试提交”不会重复此校验。该计算调用不使用普通命令的 600 秒超时；项目需配套安装 Scheme 1.7.0 或支持该接口的后续版本；1.6.x 及更早版本的因子保存会因不支持新开关而失败，不会静默跳过验证。旧项目的交互研究和历史报告不因此改写，升级前仍须迁移自定义 `compute` 的闭区间处理。
+
 构建中断时可点击“取消构建”解除保存锁定；
 调度服务明确未接收任务时可点击“重试提交”，复用该版本的构建产物。
 提交响应丢失时通过“核实提交”查找已有任务，不重复提交工作流。发布接口尚未接入。
