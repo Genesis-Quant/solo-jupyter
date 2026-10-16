@@ -83,6 +83,14 @@ class TestFilesHandler(AsyncHTTPTestCase):
         assert response.headers["Accept-Ranges"] == "bytes"
         assert "Content-Disposition" not in response.headers
 
+    def test_file_responses_do_not_compute_content_versions(self):
+        from unittest.mock import patch
+
+        with patch.object(FilesHandler, "get_content_version", side_effect=AssertionError("File content version requested")):
+            response = self.read(self.report_path())
+        assert response.code == 200
+        assert "Etag" not in response.headers
+
     def test_head_has_headers_without_file_body(self):
         response = self.read(self.report_path(), method="HEAD")
         assert response.code == 200
@@ -197,10 +205,8 @@ class TestFilesHandler(AsyncHTTPTestCase):
 
 @pytest.mark.parametrize("base_url", ["/", "/users/research/"])
 def test_server_startup_registers_file_handler_under_base_url(tmp_path, monkeypatch, base_url):
-    web_app = SimpleNamespace(settings={"base_url": base_url, "solo_installation_recovery": object()},
-                              add_handlers=Mock())
+    web_app = SimpleNamespace(settings={"base_url": base_url}, add_handlers=Mock())
     server = SimpleNamespace(web_app=web_app, root_dir=str(tmp_path))
-    monkeypatch.setattr(solo_jupyter, "start_installation_recovery", Mock(side_effect=AssertionError("already started")))
     solo_jupyter._load_jupyter_server_extension(server)
     web_app.add_handlers.assert_called_once()
     host, routes = web_app.add_handlers.call_args.args

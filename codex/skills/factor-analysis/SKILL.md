@@ -15,17 +15,17 @@ description: 在 Solo 创建或修改因子研究、Factor/FactorParams/ReportFo
 2. 使用传统 `TypeVar` / `Generic` 语法；具体项目因子直接继承 `Factor[ProjectParams]`。所有算法参数放入项目Params，不把报告设置藏进硬编码。
 3. 实现 `compute(start, end)` 返回数值列DataFrame，唯一索引为 `(date, symbol)`，日期在 `[start,end)`。代码通过 `engine_symbol` 规范化，规范化后仍需唯一。
 4. 查询按 `Universe.query` 两阶段接口；成员列不自动过滤。根据业务明确选择 `filters=[Universe.member]`、节点 `on` 或保留非成员记录。
-5. 用项目 `FactorReportForm(...).build()` 构造分析参数；表单绑定项目AnalysisParams，不复制一套不一致的Notebook参数。
+5. 用项目 `FactorReportForm(...).build()` 构造分析参数；表单绑定项目AnalysisParams，不复制一套不一致的Notebook参数。新接口用 `max_lag=2`（默认1，严格正整数，不接受bool）替代 `return_periods`；旧项目按已安装版本保留原参数和收益定义。
 6. 先离线核对DSL和参数，再按用户请求小范围 `params.run(Factor)`。检查实际面板、日期、NaN、样本数、标签有效率后扩展。
 7. 只有真实Jupyter桥接上下文才使用 `report.show()`；它会保存报告，不再重复调用save造成双份输出。独立脚本使用 `report.save(新目录)`，不要声称浏览器展示已验证。
 
 ## 不可混用的口径
 
-- Solo当前收益标签是复权收盘价的simple close-to-close N日收益；不自动切成Arena的next-open log收益。
-- 收益只读取到研究结束日前一天。尾部不足N个交易日的N日收益为NULL，不补0，也不向结束日后多读行情。
+- 新版Solo按 `k=1..max_lag` 输出各单段simple收益：`r{k-1}o(t)=O_adj(t+k)/C_adj(t+k-1)-1` 为隔夜，`r{k}(t)=C_adj(t+k)/O_adj(t+k)-1` 为日内；不是close-to-close累计收益，也不是log收益。
+- `max_lag=2` 涉及 `t,t+1,t+2` 三个交易日，依次输出 `r0o,r1,r1o,r2`。收益行情受 `[start,end)` 约束；尾部不可用的k对应列为NULL，不补0、不超界补行情，较早k仍可有效。
 - 当前Solo分析不会自动执行Arena整套MAD、标准化、行业/市值中性化。需要这些步骤时在因子实现中明确构造，并核对相同截面。
 - 多因子分析使用共同有效因子样本，不同分析列可能改变样本域；NULL标签仍不能用于相应IC/收益计算。
-- 重叠N日分组收益不是每天可复投的组合净值；不能直接连乘后称为可交易年化。
+- 不同lag的隔夜/日内分组收益不是完整日收益，也不是每天可复投的组合净值；不能直接连乘后称为可交易年化。旧版 `return_N` 仍保持原close-to-close定义，不转换或改写历史报告。
 - 相同因子名称不足以证明Solo/Arena结果可比。对齐收益价格/时点、simple或log、日期、成员、预处理、分组、权重和数据版本。
 
 ## 交付

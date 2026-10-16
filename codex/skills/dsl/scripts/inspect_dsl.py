@@ -105,13 +105,12 @@ def factor_catalog(index_codes: str | None) -> tuple[tuple[str, ...], dict[str, 
         "source": source,
         "index_codes": list(selected),
         "dotenv_loaded": False,
-        "requires_confirmation": source == "runtime-defaults",
     }
     if source == "runtime-defaults":
         configuration["warning"] = (
             "INDEX_CODES was not supplied. This catalog uses Runtime defaults, not the project's "
-            ".env configuration. Provide --index-codes before the command or export INDEX_CODES "
-            "to validate index weight factors; .env files are never loaded."
+            ".env configuration. Default index weight factors remain valid. Use --index-codes "
+            "before the command or export INDEX_CODES to select other indices; .env files are never loaded."
         )
     return factors, configuration
 
@@ -191,15 +190,6 @@ def validate_request(path: str, factor_query: Any, index_codes: str | None) -> d
         ) from error
     source_factors = query.source_factors()
     factors, configuration = factor_catalog(index_codes)
-    if configuration["requires_confirmation"] and any(
-        factor.startswith("weight_") for factor in source_factors
-    ):
-        raise HelperError(
-            "index_configuration_required",
-            "Index weight validation needs the project's effective INDEX_CODES. "
-            "Provide --index-codes before the command or export INDEX_CODES; .env files are not loaded.",
-            {"configuration": configuration},
-        )
     unknown = sorted(set(source_factors) - set(factors))
     if unknown:
         raise HelperError(
@@ -233,9 +223,8 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                     "This JSON Schema does not enumerate concrete operator dispatch constraints. "
                     "Use FactorQuery.model_validate for fields/params, BOOL rules and dependencies; "
                     "use describe <operator> for concrete schemas. The validate command also checks "
-                    "query.source_factors() against runtime.workers.available_factors() with explicit "
-                    "--index-codes or exported INDEX_CODES; index weights require configuration "
-                    "confirmation when only Runtime defaults are available. "
+                    "query.source_factors() against runtime.workers.available_factors() using Runtime "
+                    "defaults unless --index-codes or exported INDEX_CODES is supplied. "
                     "Validation neither executes DolphinScript nor checks database contents."
                 ),
             },

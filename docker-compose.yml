@@ -26,8 +26,8 @@ services:
           python -B -c "import secretstorage, sys; sys.exit(secretstorage.get_default_collection(secretstorage.dbus_init()).is_locked())"
           exec start-notebook.py --ServerApp.root_dir=/home/jovyan/work --ServerApp.default_url=/lab
         '
-    mem_limit: 4096m
-    memswap_limit: 4096m
+    mem_limit: 0
+    memswap_limit: 0
     environment:
       NB_UID: "1000"
       NB_GID: "100"

@@ -44,18 +44,18 @@ Jupyter 原生 `/files/<工作区相对路径>` 和 `?download=1` 已提供相�
 
 “安装已有项目”从 Solo 后端读取未归档且未退役的项目，仅列出当前类型及其上游类型、且 Scheme 主版本和次版本相同的其他项目，补丁版本不必相同。1.2.0 与 1.2.7 可双向安装，1.1.x、1.3.x 不混用；安装接口也执行同一校验，不能绕过候选列表。项目包的实际版本须属于同一系列，并声明整个系列的依赖范围，如 `scheme>=1.2.0,<1.3.0`。类型顺序为 factor → model → optimize → control → execution；同类项目可以相互选择，自身不能安装。
 
-安装前由 Backend 中央政策检查当前项目、候选项目和递归本地运行时依赖的发布来源。对方已保存的源码及其必要本地依赖先构建为 wheel，保存至当前项目的 `.solo-wheels/<包名>/<SHA256>/<文件名>`；不递归上游开发依赖，不传递上游 `tool.uv.sources.scheme`。运行时 extras 按 PEP 685 规范化，`gpu_fast`、`gpu-fast` 等等价拼写使用同一来源选择与递归准入。wheel 的原始 `Requires-Dist` 保留，正常解析所有直接和传递依赖的交集，不创建 Scheme override，也不改写依赖要求来掩盖冲突；已有 Scheme override 必须先移除并验证环境。
+安装前由 Backend 中央政策检查当前项目、候选项目和递归本地运行时依赖的发布来源。源码及其必要本地依赖构建为 wheel，注册后按成果 UUID 保存在当前项目的 `.solo-wheels/<包名>/<成果UUID>/<文件名>`；已发布成果按 UUID 下载，不计算文件摘要。上游开发依赖不递归，上游 Scheme source 不传播。extras 按 PEP 685 规范化，wheel 原始 `Requires-Dist` 交给 uv 解析；已有依赖更新时保留 extras 和 marker，也允许已有目录、editable、Scheme override 和 uv workspace 配置。
 
-完整解析、安装与元数据检查先在同盘隔离目录执行。预检失败不改真实配置、锁文件或环境；预检通过后，将原 `.venv` 同盘移动为本次事务的临时备份，再提交真实安装。失败恢复原 `.venv`、`pyproject.toml` 和 `uv.lock`，不只恢复配置；成功清理本次备份。当前 Scheme source 和锁定的实际补丁版本保持不变。wheel 是非 editable 的源码快照，再次安装修改后的源码生成新内容哈希，不覆盖旧冻结资产。
+安装在内存中保存原 `pyproject.toml` 和 `uv.lock`，准备 wheel 后修改依赖，执行 `uv lock`、`uv sync` 和 `uv pip check`。安装不能改变当前 Scheme 的实际版本；失败写回原配置、锁文件并重新 sync，成功后向 Backend 接受实际使用的成果 UUID。不会移动或删除原 `.venv`，也没有安装事务、续期或恢复日志。重新同步失败会直接报错，需修复依赖来源后再同步环境。
 
-安装、参数读取和版本快照在 Jupyter Server 同一进程内按项目 UUID 排他，重叠请求立即返回 409；不会让保存读到安装事务中的混合配置/锁文件。最终文件系统完成或回滚后，项目根目录 `.solo-installation.json` 持久保存原安装 UUID、完成/回滚结果及当前配置、锁文件哈希，再向 Backend 确认；响应丢失或断网时保留记录。后续安装、参数读取、保存以及服务的恢复检查先校验目录归属和这些哈希，再重试原事务，确认前不开始新的依赖操作。已接受回执不会因 TTL 过期而丢弃旧依赖保护；原备份恢复失败时保留备份，不伪造已回滚。当前环境含其他可变目录依赖、候选依赖声明含需要保留的 extras/marker 选择，或 wheel 依赖直接指向本地源码目录时明确拒绝，不静默删除选项或交给解析器修改真实目录。先冻结为普通 wheel 或移除不支持的开发依赖后再安装；此接口不提供通用依赖图迁移。固定 Git 运行时来源在事务目录检出准确 commit 并构建 wheel，不读取脏工作树或传播对方 Scheme source。
+安装、参数读取和版本快照在 Jupyter Server 同一进程内按项目 UUID 排他，重叠请求立即返回 409；后端项目操作锁只用于删除。源码内链接正常跟随，依赖路径解析后仍须位于 workspace 内。固定 Git 运行时来源在系统临时目录检出源 lock 的 commit 并构建 wheel，不传播对方 Scheme source。
 已被 Kernel 导入的包需要重启 Kernel 才能加载新代码。项目改名导致路径变化时，需重新选择安装。
 插件通过 `SOLO_BACKEND_URL`（默认 `http://backend:8000`）连接后端，列表与安装接口为 `GET/POST <base_url>/solo/project/dependencies`。
 
 后续提交和上游管理插件通过 `IProjectContext` token 获取当前项目、监听 `changed` 或调用 `refresh()`。
 五类项目均支持填写研究参数后保存版本。表单由 Scheme 对应的 ReportForm 生成；
 Model 选择默认后续算法，Optimize、Control、Execution 从已安装项目中选择上游，补齐后续默认环节。
-保存时冻结当前包及上游包，按实际项目类型提交 factor、model、optimize、control 或 execution 工作流；后三类和 model 当前均展示完整回测报告。打开参数面板、验证和保存前检查中央准入，后台构建开始前再次检查；退役项目保留源码、Notebook 与历史版本查看，但不能新保存或安装为上游。
+保存时仅复制 `pyproject.toml`、`uv.lock`、清单引用的 readme/license 和 `src`；`src` 内链接按普通复制跟随，不复制研究数据、Notebook 或环境。冻结当前包及上游包，按实际项目类型提交 factor、model、optimize、control 或 execution 工作流；后三类和 model 当前均展示完整回测报告。打开参数面板、验证和保存前检查中央准入，后台构建开始前再次检查；退役项目保留源码、Notebook 与历史版本查看，但不能新保存或安装为上游。
 构建中断时可点击“取消构建”解除保存锁定；
 调度服务明确未接收任务时可点击“重试提交”，复用该版本的构建产物。
 提交响应丢失时通过“核实提交”查找已有任务，不重复提交工作流。发布接口尚未接入。
@@ -158,7 +158,7 @@ jupyter nbconvert --to pdf "你的文件.ipynb"
 
 镜像通过 `requirements-dolphindb.txt` 安装 PyPI 发布的 `dolphindb-extension[notebook]==0.1.0b3`，
 包含预构建的 JupyterLab 前端和 Notebook magic 支持。DolphinDB Python SDK 固定为 `3.0.6.0`，
-构建时约束已有 Python 包的版本。
+构建时正常解析依赖，安装后运行 `pip check`。
 
 刷新 JupyterLab 后，点击侧栏的 DolphinDB 连接按钮，或在命令面板运行
 `DolphinDB: 管理连接`。通过该面板填写连接地址、端口、账号和密码。
@@ -187,7 +187,7 @@ jupyter nbconvert --to pdf "你的文件.ipynb"
 
 镜像通过[官方 PyPI 安装方式](https://docs.astral.sh/uv/getting-started/installation/#pypi)，从清华 PyPI 镜像预置 uv 0.12.10 和 uvx，命令位于 `/opt/conda/bin`。版本固定在 `Dockerfile` 中，容器重建后仍可使用。
 
-构建时 pip / uv 默认使用 `https://pypi.tuna.tsinghua.edu.cn/simple`，APT 使用清华 Ubuntu 镜像；Codex 和插件的 `.npmrc` 将 npm 源设为 `https://registry.npmmirror.com`，本地 `npm ci` 也沿用此源。`uv.toml` 保留硬链接模式与清华默认索引，并将 uv 管理的 Python 下载源设为 `https://registry.npmmirror.com/-/binary/python-build-standalone`；容器中该配置位于 `/etc/uv/uv.toml`。基础镜像仍使用原始 Quay / Docker Hub 名称，仓库不替换为未经验证的镜像副本。
+构建时 pip / uv 默认使用 `https://pypi.tuna.tsinghua.edu.cn/simple`，APT 使用清华 Ubuntu 镜像；镜像的 npm 配置与插件的 `.npmrc` 将 npm 源设为 `https://registry.npmmirror.com`，插件本地 `npm ci` 也沿用此源。`uv.toml` 保留硬链接模式与清华默认索引，并将 uv 管理的 Python 下载源设为 `https://registry.npmmirror.com/-/binary/python-build-standalone`；容器中该配置位于 `/etc/uv/uv.toml`。基础镜像仍使用原始 Quay / Docker Hub 名称，仓库不替换为未经验证的镜像副本。
 
 在 JupyterLab 的终端中可以直接执行：
 
@@ -204,11 +204,24 @@ uv venv --python /opt/conda/bin/python .venv
 
 ## AI 助手
 
-镜像预置 Jupyter AI 3.2.0、Codex CLI 0.153.4 和 `@agentclientprotocol/codex-acp` 1.10.0，在 JupyterLab 的 Chat 界面中使用 Codex 读取和编辑文件、执行命令以及处理 Notebook。
+镜像预置 Jupyter AI 3.2.0、npm 当前 `latest` 版本的 Codex CLI 和 `@agentclientprotocol/codex-acp`，在 JupyterLab 的 Chat 界面中使用 Codex 读取和编辑文件、执行命令以及处理 Notebook。
 
-Python 新增依赖固定在 `requirements-ai.txt`；构建时约束已有包的版本。Codex 的 npm 依赖固定在 `codex/package.json` 和 `codex/package-lock.json`，使用 Node.js 24.20.0，运行组件随镜像安装。
+Python 依赖配置保留在 `requirements-ai.txt`。Node/Codex 安装链先通过 NodeSource `setup_lts.x` 和系统包管理器安装当前 LTS 的完整 Node.js（包含 npm、npx），再通过 `npm install --global` 安装 `@openai/codex@latest` 与 `@agentclientprotocol/codex-acp@latest`。这条安装链不写死版本号或发行包 SHA，也不复制只在构建阶段安装的私有 `node_modules`。
 
-`jupyterlab-commands-toolkit==0.2.0` 的前端在模块顶层直接调用 `crypto.randomUUID()`；部分浏览器或非安全上下文没有该方法，导致模块初始化失败，MCP 命令没有前端接收者。镜像安装 AI 依赖后运行 `scripts/patch_mcp_uuid.py`，校验固定版本和原始资产 SHA256 后改用已绑定的 `@lumino/coreutils.UUID.uuid4()`。补丁不增加全局 crypto polyfill，不调整认证或权限；保留原始资产，新 chunk 和 remote entry 使用内容哈希文件名并同步更新加载清单，刷新页面即可加载修复，不需要重启 Server/Kernel。未来升级工具包若资产不同，构建会明确失败，必须重新验证补丁，不能静默替换未知版本。
+Node/npm、Codex 和 ACP 在最终镜像中完整保留，npm 全局包安装前缀为 `/usr/local`。`CODEX_PATH=/usr/local/bin/codex` 让 ACP 调用同一个全局 Codex，而不是它自己的嵌套依赖副本。当前 Compose 以 root 运行 Jupyter，可在终端执行：
+
+```bash
+node --version
+npm --version
+npx --version
+npm install -g @openai/codex@latest @agentclientprotocol/codex-acp@latest
+codex --version
+codex-acp --version
+```
+
+更新后重新打开 Codex 会话才会使用新进程；不需要重启 Notebook Kernel。容器内手动更新只改变当前容器；镜像构建执行安装时也使用 `latest`，不会回退到固定旧版。Docker 可能复用旧安装层；要强制拉取当前最新版，使用 `docker compose build --no-cache jupyter`，或在已有容器中执行上述更新命令。独立以非 root 运行镜像时，更新全局包需要相应的 `/usr/local` 写权限，不改用另一份用户级 Codex 掩盖权限问题。
+
+`jupyterlab-commands-toolkit==0.2.0` 的前端在模块顶层直接调用 `crypto.randomUUID()`；部分浏览器或非安全上下文没有该方法，导致模块初始化失败，MCP 命令没有前端接收者。镜像安装 AI 依赖后运行 `scripts/patch_mcp_uuid.py`，按固定版本及 UUID/Lumino 特征字符串定位后改用已绑定的 `@lumino/coreutils.UUID.uuid4()`。补丁不增加全局 crypto polyfill，不调整认证或权限；保留原始资产，新 chunk 和 remote entry 使用确定性的 `solo-uuid` 文件名并同步更新加载清单，刷新页面即可加载修复，不需要重启 Server/Kernel。未来升级工具包若资产不同，构建会明确失败，必须重新验证补丁，不能静默替换未知版本。
 
 首次使用时，打开 JupyterLab 的终端，执行：
 
@@ -247,7 +260,7 @@ DSL skill 提供本地脚本，始终用研究项目的解释器运行：
 .venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py validate request.json
 ```
 
-它读取已安装 Runtime 的注册表和 Pydantic 模型，校验依赖字段白名单，不连接数据库、不计算数据或安装依赖；不会加载 `.env`。字段目录和校验结果的 `configuration` 说明指数配置来源：显式 `--index-codes`（放在子命令前）优先于已导出的 `INDEX_CODES`，未提供时只列出 Runtime 默认配置并警告。默认配置不等于项目 `.env`，此时权重字段校验返回 `index_configuration_required`，不再误判为未知字段；静态字段仍可校验。
+它读取已安装 Runtime 的注册表和 Pydantic 模型，校验依赖字段白名单，不连接数据库、不计算数据或安装依赖；不会加载 `.env`。字段目录和校验结果的 `configuration` 说明指数配置来源：显式 `--index-codes`（放在子命令前）优先于已导出的 `INDEX_CODES`，未提供时使用 Runtime 默认配置并警告。默认目录中的指数权重字段正常校验；默认配置不代表项目 `.env`，需要其它指数时显式传入非敏感配置。
 
 项目若仅在 `.env` 中设置指数，用已确认的非敏感配置显式传入，不需要加载或导出密码。例如项目实际配置为 `123456.SH` 时：
 
@@ -276,11 +289,11 @@ DSL 测试需要已安装 `arena-runtime` 的项目 Python；没有该包时相�
 
 ### 按项目绑定 Python 代码智能
 
-`solo-jupyter` 同时注册 `solo_project_environment` pylsp 插件。插件在服务端初始化、配置更新和文档请求时自动启用 `solo` 配置源；前端 `pylsp.configurationSources` 保留 `pycodestyle` 等内置值，不添加前端 schema 不支持的 `solo`。每个文档按 `/shared/projects/<类型>/<项目>` 识别所属项目，校验 `.solo`、`pyproject.toml`、`src` 和 `.venv`，分别使用项目 `.venv/bin/python` 与 `src`。不根据当前标签页或 Kernel 改写全局设置，多项目可同时补全、悬浮和 Alt+点击跳转。
+`solo-jupyter` 同时注册 `solo_project_environment` pylsp 插件。插件在服务端初始化、配置更新和文档请求时自动启用 `solo` 配置源；前端 `pylsp.configurationSources` 保留 `pycodestyle` 等内置值，不添加前端 schema 不支持的 `solo`。每个文档按 `/shared/projects/<类型>/<项目>` 识别所属项目，校验 `.solo`、`pyproject.toml` 和项目解释器，分别使用项目 `.venv/bin/python` 与 `src`。不根据当前标签页或 Kernel 改写全局设置，多项目可同时补全、悬浮和 Alt+点击跳转。
 
 Notebook 的 Python 虚拟文档保留原始相对路径；插件将 `JP_LSP_VIRTUAL_DIR` 下的文档映射回 `SOLO_SHARED_DIR`，再识别同一项目。非项目文件、无效标识或尚未创建的环境使用默认配置，不借用其他项目的依赖。
 
-打开文档及代码智能请求前会检查文档所属项目、项目标识、依赖清单、锁文件、环境目录及 site-packages 下直接 `.pth` 文件的变化；变化时清除 pylsp 共享配置缓存，并仅移除受影响项目的 Jedi 环境缓存。定义与类型定义、补全、悬浮、引用、签名、检查、文档符号、高亮及重命名均在对应 pylsp hook 中刷新；动态增删工作区后，按文档实际持有的配置与工作区清除缓存，无需关闭重开文档。正常 uv 管理的解释器符号链接受到支持，但项目/环境目录不能通过符号链接逃逸。支持当前固定的 `python-lsp-server==1.15.0`；配置源注册和环境缓存使用其私有接口，升级时应运行回归测试。
+打开文档及代码智能请求前按文档识别所属项目，仅在项目解释器或 `uv.lock` 的修改时间变化时清除 pylsp 共享配置缓存，并仅移除受影响项目的 Jedi 环境缓存。定义与类型定义、补全、悬浮、引用、签名、检查、文档符号、高亮及重命名均在对应 pylsp hook 中刷新；动态增删工作区后，按文档实际持有的配置与工作区清除缓存，无需关闭重开文档。项目不要求存在 `src`，元数据名称不要求与目录名一致，环境目录可以是链接；文件所属项目仍须位于工作区内。支持当前固定的 `python-lsp-server==1.15.0`；配置源注册和环境缓存使用其私有接口，升级时应运行回归测试。
 
 测试在 `extension/` 中执行：
 

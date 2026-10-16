@@ -11,9 +11,8 @@ const assets = process.env.SOLO_MCP_TEST_ASSETS;
 assert.ok(assets, "Set SOLO_MCP_TEST_ASSETS to the validated toolkit asset folder");
 const packageJson = JSON.parse(readFileSync(join(assets, "package.json"), "utf8"));
 const remote = readFileSync(join(assets, packageJson.jupyterlab._build.load), "utf8");
-const hash = /509:"([a-f0-9]{20})"/.exec(remote)?.[1];
-assert.ok(hash, "Patched remote entry must reference chunk 509");
-const source = readFileSync(join(assets, "static", `509.${hash}.js`), "utf8");
+assert.match(remote, /509:"solo-uuid"/, "Patched remote entry must reference chunk 509");
+const source = readFileSync(join(assets, "static", "509.solo-uuid.js"), "utf8");
 const schema = "https://events.jupyter.org/jupyterlab_command_toolkit/lab_command/v1";
 
 function load(crypto) {

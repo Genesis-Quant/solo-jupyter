@@ -1,30 +1,11 @@
 ARG NOTEBOOK_IMAGE=quay.io/jupyter/scipy-notebook:latest
-FROM node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS codex-runtime
+FROM ${NOTEBOOK_IMAGE} AS notebook-node
 
-ENV npm_config_registry=https://registry.npmmirror.com
-WORKDIR /opt/jupyter-codex
-COPY codex/package.json codex/package-lock.json codex/.npmrc ./
-RUN npm ci --omit=dev --no-audit --no-fund
-
-FROM ${NOTEBOOK_IMAGE} AS solo-extension
-USER root
-COPY --from=codex-runtime /usr/local/bin/node /usr/local/bin/node
-COPY --from=codex-runtime /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
-RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm
 ENV PATH="/usr/local/bin:${PATH}" \
     PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-    npm_config_registry=https://registry.npmmirror.com
-WORKDIR /opt/solo-extension
-COPY extension/package.json extension/package-lock.json extension/.npmrc ./
-RUN npm ci --ignore-scripts --no-audit --no-fund
-COPY extension/ ./
-RUN npm run build -- --core-package-file "$(python -c 'from pathlib import Path; import jupyterlab; print(Path(jupyterlab.__file__).parent / "staging" / "package.json")')" \
-    && python -m pip wheel --no-cache-dir --no-deps --index-url https://pypi.tuna.tsinghua.edu.cn/simple --wheel-dir /tmp/solo-wheel .
-
-FROM ${NOTEBOOK_IMAGE}
-
-ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     npm_config_registry=https://registry.npmmirror.com \
+    npm_config_prefix=/usr/local \
+    CODEX_PATH=/usr/local/bin/codex \
     UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple \
     UV_PYTHON_INSTALL_MIRROR=https://registry.npmmirror.com/-/binary/python-build-standalone
 USER root
@@ -33,6 +14,8 @@ RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu|https://mirrors.tuna.tsinghua.
         -e 's|http://security.ubuntu.com/ubuntu|https://mirrors.tuna.tsinghua.edu.cn/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
         fonts-noto-cjk \
         pandoc \
         texlive-fonts-recommended \
@@ -41,6 +24,31 @@ RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu|https://mirrors.tuna.tsinghua.
         texlive-xetex \
     && rm -rf /var/lib/apt/lists/*
 
+RUN rm -f /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx \
+    && curl --fail --show-error --location --retry 3 https://deb.nodesource.com/setup_lts.x | bash - \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version && npx --version
+
+FROM notebook-node AS solo-extension
+USER root
+WORKDIR /opt/solo-extension
+COPY extension/package.json extension/package-lock.json extension/.npmrc ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY extension/ ./
+RUN npm run build -- --core-package-file "$(python -c 'from pathlib import Path; import jupyterlab; print(Path(jupyterlab.__file__).parent / "staging" / "package.json")')" \
+    && python -m pip wheel --no-cache-dir --no-deps --index-url https://pypi.tuna.tsinghua.edu.cn/simple --wheel-dir /tmp/solo-wheel .
+
+FROM notebook-node
+USER root
+RUN rm -f /usr/local/bin/codex /usr/local/bin/codex-acp \
+    && npm install --global --no-audit --no-fund \
+        @openai/codex@latest \
+        @agentclientprotocol/codex-acp@latest \
+    && install -d -o "${NB_UID}" -g "${NB_GID}" -m 700 "/home/${NB_USER}/.codex" \
+    && node --version && npm --version && npx --version \
+    && codex --version && codex-acp --version
+
 USER ${NB_UID}
 
 COPY requirements-code-check.txt /tmp/requirements-code-check.txt
@@ -48,26 +56,11 @@ RUN python -m pip install --no-cache-dir --requirement /tmp/requirements-code-ch
     && python -m pip check
 
 COPY requirements-ai.txt /tmp/requirements-ai.txt
-RUN python -B -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions())))' > /tmp/requirements-existing.txt \
-    && python -m pip install --no-cache-dir \
-        --constraint /tmp/requirements-existing.txt \
-        --requirement /tmp/requirements-ai.txt \
-    && python -m pip check \
-    && rm /tmp/requirements-existing.txt
+RUN python -m pip install --no-cache-dir --requirement /tmp/requirements-ai.txt \
+    && python -m pip check
 
 COPY scripts/patch_mcp_uuid.py /tmp/patch_mcp_uuid.py
 RUN python -B /tmp/patch_mcp_uuid.py
-
-COPY --from=codex-runtime /usr/local/bin/node /usr/local/bin/node
-COPY --from=codex-runtime /opt/jupyter-codex /opt/jupyter-codex
-
-USER root
-RUN ln -sf /opt/jupyter-codex/node_modules/.bin/codex /usr/local/bin/codex \
-    && ln -sf /opt/jupyter-codex/node_modules/.bin/codex-acp /usr/local/bin/codex-acp \
-    && install -d -o "${NB_UID}" -g "${NB_GID}" -m 700 "/home/${NB_USER}/.codex"
-
-USER ${NB_UID}
-RUN node --version && codex --version && codex-acp --version
 
 RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: uv==0.12.10 \
     && uv --version \
@@ -75,13 +68,9 @@ RUN python -m pip install --no-cache-dir --no-deps --only-binary=:all: uv==0.12.
     && python -m pip check
 
 COPY requirements-dolphindb.txt /tmp/requirements-dolphindb.txt
-RUN python -B -c 'import importlib.metadata as m; print("\n".join(sorted(d.metadata["Name"] + "==" + d.version for d in m.distributions())))' > /tmp/requirements-existing.txt \
-    && python -m pip install --no-cache-dir --only-binary=:all: \
-        --constraint /tmp/requirements-existing.txt \
-        --requirement /tmp/requirements-dolphindb.txt \
+RUN python -m pip install --no-cache-dir --only-binary=:all: --requirement /tmp/requirements-dolphindb.txt \
     && python -m pip check \
-    && python -B -c 'import dolphindb, dolphindb_extension; print("DolphinDB extension: " + dolphindb_extension.__version__)' \
-    && rm /tmp/requirements-existing.txt
+    && python -B -c 'import dolphindb, dolphindb_extension; print("DolphinDB extension: " + dolphindb_extension.__version__)'
 
 USER root
 RUN printf '%s\n' \

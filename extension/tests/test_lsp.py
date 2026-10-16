@@ -209,21 +209,14 @@ def test_invalid_metadata_falls_back(roots, metadata):
     assert lsp.SoloProjectConfig(str(shared)).project_config(str(project / "src/algo.py")) == {}
 
 
-def test_metadata_must_match_project_directory(roots):
+def test_metadata_name_need_not_match_project_directory(roots):
     shared, _ = roots
     project = make_project(shared)
     marker = project / ".solo"
     data = json.loads(marker.read_text())
     data["name"] = "different_project"
     marker.write_text(json.dumps(data))
-    assert lsp.SoloProjectConfig(str(shared)).project_config(str(project / "src/algo.py")) == {}
-
-
-def test_oversized_metadata_does_not_bind(roots):
-    shared, _ = roots
-    project = make_project(shared)
-    (project / ".solo").write_text(" " * 65537)
-    assert lsp.SoloProjectConfig(str(shared)).project_config(str(project / "src/algo.py")) == {}
+    assert lsp.SoloProjectConfig(str(shared)).project_config(str(project / "src/algo.py"))["plugins"]["jedi"]["environment"] == str(project / ".venv/bin/python")
 
 
 def symlink(path, target, *, directory=False):
@@ -677,8 +670,7 @@ def update_editable_dependency(dependency, *, touch_lockfile=True):
         (dependency.project / "uv.lock").write_text("version = 2\n")
 
 
-@pytest.mark.parametrize("touch_lockfile", [True, False], ids=["with-lock-change", "pth-only"])
-def test_type_definition_first_request_refreshes_editable_dependency(private_language_server, editable_dependency, touch_lockfile):
+def test_type_definition_first_request_refreshes_editable_dependency(private_language_server, editable_dependency):
     server, dependency = private_language_server, editable_dependency
     server.m_text_document__did_open(textDocument={"uri": dependency.uri, "text": dependency.source, "version": 1})
     arguments = {"textDocument": {"uri": dependency.uri}, "position": {"line": 2, "character": 2}}
@@ -687,11 +679,7 @@ def test_type_definition_first_request_refreshes_editable_dependency(private_lan
     python = str(dependency.project / ".venv/bin/python")
     old_environment = workspace._environments[python]
     assert str(dependency.old_root) in old_environment.get_sys_path()
-    site_stamp = lsp.SoloProjectConfig._stamp(dependency.pth.parent)
-    update_editable_dependency(dependency, touch_lockfile=touch_lockfile)
-    if not touch_lockfile:
-        assert not (dependency.project / "uv.lock").exists()
-        assert lsp.SoloProjectConfig._stamp(dependency.pth.parent) == site_stamp
+    update_editable_dependency(dependency)
     assert str(dependency.old_root) in old_environment.get_sys_path()
     assert str(dependency.new_root) not in old_environment.get_sys_path()
 
@@ -732,3 +720,51 @@ def test_workspace_folder_migration_refreshes_document_owner_without_reopen(priv
     assert new_workspace._environments == {}
     assert new_workspace.get_document(dependency.uri) is document
     assert document._workspace is old_workspace and document._config is old_workspace._config
+
+
+def test_missing_src_still_binds_project_environment(roots):
+    shared, _ = roots
+    project = make_project(shared)
+    (project / "src").rmdir()
+    result = lsp.SoloProjectConfig(str(shared)).project_config(str(project / "research.ipynb"))
+    assert result["plugins"]["jedi"]["environment"] == str(project / ".venv/bin/python")
+
+
+def test_linked_environment_is_supported(roots, tmp_path):
+    shared, _ = roots
+    project = make_project(shared)
+    environment = tmp_path / "external-venv"
+    (project / ".venv").rename(environment)
+    symlink(project / ".venv", environment, directory=True)
+    result = lsp.SoloProjectConfig(str(shared)).project_config(str(project / "research.ipynb"))
+    assert result["plugins"]["jedi"]["environment"] == str(project / ".venv/bin/python")
+
+
+def test_refresh_only_stats_interpreter_and_lock_without_environment_scan(roots, monkeypatch):
+    shared, _ = roots
+    project = make_project(shared)
+    config = config_for(shared)
+    source = config._config_sources["solo"]
+    workspace = SimpleNamespace(_environments={})
+    calls = []
+    stamp = source._stamp
+
+    def record(path):
+        calls.append(path)
+        return stamp(path)
+
+    monkeypatch.setattr(source, "_stamp", record)
+    monkeypatch.setattr(type(project), "glob", Mock(side_effect=AssertionError("Refresh scanned environment")))
+    source.refresh(config, workspace, str(project / "src/algo.py"))
+    python = str(project / ".venv/bin/python")
+    workspace._environments[python] = environment = object()
+    (project / "pyproject.toml").write_text('[project]\nname="changed"\n')
+    source.refresh(config, workspace, str(project / "src/algo.py"))
+    assert workspace._environments[python] is environment
+    assert calls == [project / ".venv/bin/python", project / "uv.lock"] * 2
+    import os
+    path = project / ".venv/bin/python"
+    info = path.stat()
+    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+    source.refresh(config, workspace, str(project / "src/algo.py"))
+    assert python not in workspace._environments

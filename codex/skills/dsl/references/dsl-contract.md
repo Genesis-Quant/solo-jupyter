@@ -63,7 +63,7 @@ Arena Runtime 的当前规则需要结合项目安装版本核实：
 
 ## 常见排查
 
-1. 未知字段：读取 `factors` 全白名单及 `configuration`。对于指数权重，先确认显式 `--index-codes` 或已导出的 `INDEX_CODES` 与项目有效配置一致；`runtime-defaults` 不是项目 `.env` 的证明。缺少确认时返回 `index_configuration_required`，补充非敏感配置后再校验，不凭默认目录删除合法字段。静态字段名称错误与实际数据为空分别处理。
+1. 未知字段：读取 `factors` 全白名单及 `configuration`。对于指数权重，先确认显式 `--index-codes` 或已导出的 `INDEX_CODES` 与项目有效配置一致；`runtime-defaults` 不是项目 `.env` 的证明。未显式配置时采用 Runtime 默认目录并提示，目录中已有指数权重字段正常校验；其它指数通过非敏感参数选择，不读取 `.env`。静态字段名称错误与实际数据为空分别处理。
 2. 未知算符/参数：使用 `operators` 搜索后 `describe`，不猜参数名。
 3. 缺少成员节点：使用 `Universe.dataset_query` 的注入后对象，或对普通 Query 显式定义自己的 BOOL 条件；不要把托管字符串当到处可用。
 4. 筛选后排名变化：检查完整代码域、on、lookback、上游列和数据版本，filters不提前参与排名。

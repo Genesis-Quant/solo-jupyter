@@ -409,7 +409,7 @@ def test_real_cli_keeps_index_configuration_without_reading_dotenv(runtime_model
     ]
     assert data["configuration"] == {
         "source": "environment", "index_codes": ["123456.SH", "654321.SZ"],
-        "dotenv_loaded": False, "requires_confirmation": False,
+        "dotenv_loaded": False,
     }
 
 
@@ -433,31 +433,23 @@ def test_dotenv_only_configuration_is_not_presented_as_project_catalog(
     configuration = json.loads(result.stdout)["configuration"]
     assert configuration["source"] == "runtime-defaults"
     assert configuration["dotenv_loaded"] is False
-    assert configuration["requires_confirmation"] is True
     assert "--index-codes" in configuration["warning"]
     assert ".env" in configuration["warning"]
 
 
-@pytest.mark.parametrize("payload", [
-    query(factors=["weight_123456SH"]),
-    query(factors=["weight_000300SH"]),
-    query(derivatives={"member": node("binary.gt", {"left": "weight_123456SH", "right": 0})}),
-    query(derivatives={"value": node(fields={
-        "left": node("binary.gt", {"left": "weight_123456SH", "right": 0}), "right": 1,
-    })}),
-])
-def test_weight_validation_requires_configuration_instead_of_default_guess(
-    runtime_models, tmp_path, monkeypatch, payload,
-):
+def test_default_weight_validation_uses_catalog_and_warns(runtime_models, tmp_path, monkeypatch):
     monkeypatch.delenv("INDEX_CODES", raising=False)
-    (tmp_path / ".env").write_text("INDEX_CODES=123456.SH\n", encoding="utf-8")
-    result = run_cli(tmp_path, ["validate", "-"], payload)
+    catalog = json.loads(run_cli(tmp_path, ["factors"]).stdout)
+    factor = next(value for value in catalog["factors"] if value.startswith("weight_"))
+    result = run_cli(tmp_path, ["validate", "-"], query(factors=[factor]))
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["success"] is True
+    assert data["configuration"]["source"] == "runtime-defaults"
+    assert "warning" in data["configuration"]
+    result = run_cli(tmp_path, ["validate", "-"], query(factors=["weight_123456SH"]))
     assert result.returncode == 1
-    assert result.stdout == ""
-    error = json.loads(result.stderr)["error"]
-    assert error["type"] == "index_configuration_required"
-    assert "--index-codes" in error["message"]
-    assert error["details"]["configuration"]["source"] == "runtime-defaults"
+    assert json.loads(result.stderr)["error"]["type"] == "unknown_factors"
 
 
 @pytest.mark.parametrize("extra_env", [{}, {"INDEX_CODES": "654321.SZ"}])
@@ -479,7 +471,7 @@ def test_explicit_indices_validate_dotenv_config_without_reading_it(
     assert data["source_factors"] == ["weight_123456SH"]
     assert data["configuration"] == {
         "source": "option", "index_codes": ["123456.SH"],
-        "dotenv_loaded": False, "requires_confirmation": False,
+        "dotenv_loaded": False,
     }
     assert "synthetic-secret" not in result.stdout + result.stderr
 
@@ -518,7 +510,6 @@ def test_explicit_indices_follow_runtime_empty_and_whitespace_semantics(
 ):
     _, result = invoke(capsys, monkeypatch, ["--index-codes", codes, "factors"])
     assert result["configuration"]["index_codes"] == expected
-    assert result["configuration"]["requires_confirmation"] is False
     weights = [f for f in result["factors"] if f.startswith("weight_")]
     assert len(weights) == len(expected)
 
@@ -538,4 +529,3 @@ def test_default_configuration_does_not_block_static_factors(runtime_models, tmp
     assert data["success"] is True
     assert data["source_factors"] == ["close"]
     assert data["configuration"]["source"] == "runtime-defaults"
-    assert data["configuration"]["requires_confirmation"] is True

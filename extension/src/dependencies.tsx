@@ -21,7 +21,6 @@ interface Artifact {
   kind: ProjectKind;
   schemeVersion: string;
   sourceProjectName: string | null;
-  sha256: string;
 }
 
 type Selection = { live_project_id: string } | { artifact_id: string };
@@ -106,7 +105,7 @@ function Installer({ project }: { project: Project }): React.ReactElement {
       onChange={(event) => setSelected((event.target as HTMLSelectElement).value)}>
       {count ? mode === 'published' ? artifacts.map((artifact) =>
         <Option key={artifact.id} value={artifact.id}>
-          {kinds[artifact.kind]} / {artifact.sourceProjectName ?? artifact.package} · {artifact.version} · {artifact.sha256.slice(0, 8)}
+          {kinds[artifact.kind]} / {artifact.sourceProjectName ?? artifact.package} · {artifact.version}
         </Option>
       ) : candidates.map((candidate) =>
         <Option key={candidate.id} value={candidate.id}>

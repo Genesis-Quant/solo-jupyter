@@ -8,6 +8,10 @@ from tornado import web
 
 
 class FilesHandler(AuthenticatedFileHandler):
+    def compute_etag(self) -> None:
+        # Tornado 默认的静态文件 ETag 会读取整个文件计算摘要。
+        return None
+
     def parse_url_path(self, url_path: str) -> str:
         relative = PurePosixPath(url_path)
         if (

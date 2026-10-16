@@ -105,6 +105,26 @@ def test_discovery_does_not_start_model_turns():
     assert 'CODEX_HOME=str(codex_home)' in source
 
 
+def test_factor_skill_examples_use_max_lag_and_document_segment_boundaries():
+    directory = SKILLS / "factor-analysis"
+    for path in [directory / "SKILL.md", directory / "references/factor-contract.md", directory / "references/evaluation.md"]:
+        text = path.read_text(encoding="utf-8")
+        assert "max_lag" in text
+        assert "r0o" in text and "r1o" in text and "r2" in text
+        assert "simple" in text and "隔夜" in text and "日内" in text
+        assert "[start,end)" in text and "NULL" in text
+        assert "close-to-close累计收益" in text
+        assert "历史报告" in text or "篡改历史" in text
+        for source in re.findall(r"^```python\s*\n(.*?)^```", text, re.M | re.S):
+            tree = ast.parse(source)
+            assert not any(isinstance(node, ast.keyword) and node.arg == "return_periods" for node in ast.walk(tree))
+    contract = (directory / "references/factor-contract.md").read_text(encoding="utf-8")
+    assert "max_lag=2" in contract
+    assert "params.return_columns" in contract and "params.return_specs" in contract
+    for field in ("kind", "periods", "lag", "session", "turnover_period"):
+        assert field in contract
+
+
 def test_current_factor_example_builds_without_execution():
     pytest.importorskip("scheme")
     path = SKILLS / "factor-analysis/references/factor-contract.md"
@@ -114,11 +134,56 @@ def test_current_factor_example_builds_without_execution():
     from scheme import StockPool
     from scheme.execute.strategy.assembly import parameter_type
 
-    form = namespace["FactorReportForm"](
-        start="2024-06-03", end="2024-06-08", pool=StockPool.SSE50,
-        periods=20, return_periods=[1, 2],
-    )
-    params = form.build()
+    example = ast.parse(blocks[1], filename=str(path))
+    assert ast.unparse(example.body[-1]) == "report = params.run(Factor)"
+    example.body.pop()  # 仅构建示例参数，不执行研究或连接数据库。
+    exec(compile(example, str(path), "exec"), namespace)
+    params = namespace["params"]
     assert params.periods == 20
     assert params.universe.pool == StockPool.SSE50
+    assert params.max_lag == 2
+    assert not hasattr(params, "return_periods")
+    assert params.return_columns == ["r0o", "r1", "r1o", "r2"]
+    assert params.return_specs == {
+        "r0o": {"kind": "simple", "periods": 1, "lag": 0, "session": "overnight", "turnover_period": 1},
+        "r1": {"kind": "simple", "periods": 1, "lag": 1, "session": "intraday", "turnover_period": 1},
+        "r1o": {"kind": "simple", "periods": 1, "lag": 1, "session": "overnight", "turnover_period": 2},
+        "r2": {"kind": "simple", "periods": 1, "lag": 2, "session": "intraday", "turnover_period": 2},
+    }
+    for settings in ({}, {"max_lag": 1}):
+        single_lag = namespace["FactorReportForm"](
+            start="2024-06-03", end="2024-06-08", pool=StockPool.SSE50,
+            periods=20, **settings,
+        ).build()
+        assert single_lag.max_lag == 1
+        assert single_lag.return_columns == ["r0o", "r1"]
+        assert single_lag.return_specs == {name: params.return_specs[name] for name in ("r0o", "r1")}
     assert parameter_type(namespace["Factor"]) is namespace["FactorParams"]
+
+
+def test_dsl_defaults_validate_existing_index_weights_and_never_load_dotenv(monkeypatch, tmp_path):
+    from types import ModuleType, SimpleNamespace
+    import sys
+
+    spec = importlib.util.spec_from_file_location("skill_inspect_dsl", SKILLS / "dsl/scripts/inspect_dsl.py")
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    monkeypatch.delenv("INDEX_CODES", raising=False)
+    modules = {name: ModuleType(name) for name in ("runtime", "runtime.config", "runtime.utils", "runtime.workers", "pydantic")}
+    modules["pydantic"].ValidationError = ValueError
+    modules["runtime.config"].INDEX_CODES = ("000300.SH",)
+    modules["runtime.utils"].index_weight_factor = lambda code: "weight_" + code.replace(".", "")
+    modules["runtime.workers"].available_factors = lambda: ("close", "weight_000300SH")
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    request = tmp_path / "request.json"
+    request.write_text('{}', encoding="utf-8")
+    query = SimpleNamespace(source_factors=lambda: ["weight_000300SH"], model_dump=lambda **_: {"factors": ["weight_000300SH"]})
+    result = helper.validate_request(str(request), SimpleNamespace(model_validate=lambda _: query), None)
+    assert result["success"] is True
+    assert result["configuration"]["source"] == "runtime-defaults"
+    assert result["configuration"]["dotenv_loaded"] is False
+    assert "Runtime defaults" in result["configuration"]["warning"]
+    assert ".env files are never loaded" in result["configuration"]["warning"]
+    assert helper.os.environ["PYTHON_DOTENV_DISABLED"] == "1"
+    assert "Runtime 默认" in (SKILLS / "dsl/SKILL.md").read_text(encoding="utf-8")

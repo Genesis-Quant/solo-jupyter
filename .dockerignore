@@ -9,9 +9,6 @@
 !scripts/patch_mcp_uuid.py
 !scripts/check_codex_skills.py
 !codex/
-!codex/package.json
-!codex/package-lock.json
-!codex/.npmrc
 !codex/skills/
 !codex/skills/**
 !extension/

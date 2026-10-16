@@ -25,8 +25,8 @@ def _positive_integer(value, name):
 
 
 def _settings(height, theme, annual_trading_days, risk_free_rate):
-    if isinstance(height, bool) or not isinstance(height, int) or height < 200:
-        raise ValueError("height 不能小于 200")
+    if isinstance(height, bool) or not isinstance(height, (int, float)) or not height > 0:
+        raise ValueError("height 必须为正数")
     if theme not in {"light", "dark"}:
         raise ValueError("theme 必须为 light 或 dark")
     _positive_integer(annual_trading_days, "annual_trading_days")
@@ -70,17 +70,31 @@ def _manifest(report, *, theme, annual_trading_days, risk_free_rate):
         if parameters is None:
             raise ValueError("因子报告缺少分析参数；请使用 analyze_factors 返回的报告")
         columns = list(parameters.columns)
-        periods = list(parameters.return_periods)
         if not columns or any(not isinstance(column, str) or not column.strip() or "\x00" in column for column in columns) or len(set(columns)) != len(columns):
             raise ValueError("因子报告缺少有效且不重复的因子列")
-        if not periods or len(set(periods)) != len(periods):
-            raise ValueError("因子报告缺少有效且不重复的收益持有期")
-        for period in periods:
-            _positive_integer(period, "return_periods")
+        if hasattr(parameters, "max_lag"):
+            max_lag = _positive_integer(parameters.max_lag, "max_lag")
+            return_specs = {}
+            for lag in range(1, max_lag + 1):
+                for name, offset, session in (
+                    (f"r{lag - 1}o", lag - 1, "overnight"), (f"r{lag}", lag, "intraday"),
+                ):
+                    return_specs[name] = {
+                        "kind": "simple", "periods": 1, "lag": offset,
+                        "session": session, "turnover_period": lag,
+                    }
+        else:
+            # 旧项目仍按原收益定义展示，不改写已有报告或要求升级 Scheme。
+            periods = list(parameters.return_periods)
+            if not periods or len(set(periods)) != len(periods):
+                raise ValueError("因子报告缺少有效且不重复的收益持有期")
+            for period in periods:
+                _positive_integer(period, "return_periods")
+            return_specs = {f"return_{period}": {"kind": "simple", "periods": period} for period in periods}
         data["parameters"] = {
             "factor_columns": columns,
-            "return_columns": [f"return_{period}" for period in periods],
-            "return_specs": {f"return_{period}": {"kind": "simple", "periods": period} for period in periods},
+            "return_columns": list(return_specs),
+            "return_specs": return_specs,
             "n_groups": _positive_integer(parameters.groups, "groups"),
             "n_select": _positive_integer(parameters.n_select, "n_select"),
         }

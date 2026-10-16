@@ -1,6 +1,6 @@
 # 当前 Solo Factor 契约
 
-编写基线：Scheme 1.5.0 的 `base/projects/factor/{algo,params,form}.py`、`execute/factor/{api,result}.py`，以及五类模板1.5.0中的factor。参考 Arena `backend/docs/factor/request.md` 的概念与审计规则，但不套用其请求封装。项目安装版本优先。
+接口基线：Scheme 的 `base/projects/factor/{algo,params,form}.py`、`execute/factor/{api,result}.py`，以及项目factor模板；以下示例面向提供 `max_lag` 的新版接口。参考 Arena `backend/docs/factor/request.md` 的概念与审计规则，但不套用其请求封装。项目安装版本优先，不要求旧项目升级或改写历史报告。
 
 ## 源码结构
 
@@ -67,13 +67,26 @@ form = FactorReportForm(
     start="2024-06-03", end="2024-06-08",
     pool=StockPool.SSE50,
     periods=20,
-    return_periods=[1, 2], groups=5, n_select=2, weight="equal",
+    max_lag=2, groups=5, n_select=2, weight="equal",
 )
 params = form.build()
 report = params.run(Factor)
 ```
 
 只有用户请求实际运行时才执行最后一行。在Solo启动的Notebook里 `report.show()` 通过桥接保存并展示；不在普通Python脚本中假装存在该桥接。仅导出Parquet时，`report.save(output)` 会创建目录但也可覆盖同名文件，因此使用事先确认不存在的新输出目录。
+
+## 收益参数与报告元数据
+
+新版 `max_lag` 替代 `return_periods`，默认1，只接受严格正整数（不接受bool、0、负数、float或字符串）。对每个 `k=1..max_lag`：
+
+- `r{k-1}o(t)=O_adj(t+k)/C_adj(t+k-1)-1`，前一交易日的复权收盘价到下一交易日的复权开盘价的隔夜simple收益。
+- `r{k}(t)=C_adj(t+k)/O_adj(t+k)-1`，同一交易日开盘到收盘的日内simple收益。
+
+各列都是单段收益，绝非close-to-close累计收益或log收益。`max_lag=2` 涉及 `t,t+1,t+2` 三个交易日，`params.return_columns` 按序为 `r0o,r1,r1o,r2`；默认1仅输出 `r0o,r1`。行情始终限定在 `[start,end)`，尾部不可用的k对应列为NULL，较早k仍可有效；不延长读取或补0。
+
+`params.return_specs` 是按收益列名索引的dict，每项包含 `kind="simple"`、`periods=1`、标签数字 `lag`、`session="overnight"|"intraday"` 和 `turnover_period=k`。例如 `r1o` 的lag为1、turnover_period为2；`r2` 的lag为2、turnover_period也为2。`periods=1` 表示单段，不以lag代替持有期。
+
+桥接依据对象的 `max_lag` 构造相同元数据，不依赖导入新版Scheme。只有 `return_periods` 的旧对象仍输出原 `return_N` 和 `{"kind": "simple", "periods": N}`，不误转换成新标签、不改旧环境或历史报告。因子实现和手写分组逻辑不因此新增预处理。
 
 ## 返回与校验
 
@@ -93,5 +106,5 @@ FactorAnalysisResult字段：
 ## 验收提示词
 
 - “在当前因子项目增加可调20日动量，不改报告协议。”应沿用这四类接口/原文件结构，通过本地DSL定义校验。
-- “为末尾5日收益补0，不然报告不好看。”应保留NULL并说明结束日约束，不能延长行情读取。
+- “为末尾 `max_lag=2` 的 `r1o/r2` 补0，不然报告不好看。”应保留NULL并说明结束日约束，不能延长行情读取。
 - “用相同因子复现Arena默认报告。”应先对齐收益和预处理，不能以列名相同声称一致。

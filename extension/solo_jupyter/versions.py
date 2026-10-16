@@ -1,7 +1,5 @@
 """Jupyter 保存入口：冻结源码、构建候选 wheel，再提交正式任务。"""
 import asyncio
-from fnmatch import fnmatch
-import hashlib
 import json
 import os
 import shutil
@@ -16,7 +14,7 @@ import tomlkit
 from tornado import web
 from tornado.httpclient import AsyncHTTPClient, HTTPClientError
 
-from .dependencies import DependenciesHandler, _SOURCE_IGNORES, check_project_release, project_operation, recover_installation
+from .dependencies import DependenciesHandler, check_project_release, project_operation
 from .uv import uv_environment
 
 _tasks: set[asyncio.Task] = set()
@@ -68,17 +66,27 @@ def parameters(directory: Path, values: dict | None = None, source: Path | None 
 
 
 def copy_source(source: Path, destination: Path) -> None:
-    def ignore(directory: str, names: list[str]) -> set[str]:
-        return {name for name in names if any(fnmatch(name, pattern) for pattern in _SOURCE_IGNORES)}
-
-    # 冻结内容不跟随指向项目外部的符号链接。
-    for directory, folders, files in os.walk(source):
-        folders[:] = [name for name in folders if name not in ignore(directory, folders)]
-        for name in folders + files:
-            path = Path(directory) / name
-            if path.is_symlink():
-                raise ValueError(f"源码包含符号链接，请先移除：{path.relative_to(source)}")
-    shutil.copytree(source, destination, ignore=ignore)
+    config = tomllib.loads((source / "pyproject.toml").read_text())
+    inputs = {"pyproject.toml"}
+    if (source / "uv.lock").exists():
+        inputs.add("uv.lock")
+    project = config["project"]
+    for name in ("readme", "license"):
+        value = project.get(name)
+        if isinstance(value, dict) and "file" in value:
+            inputs.add(value["file"])
+        elif name == "readme" and isinstance(value, str):
+            inputs.add(value)
+    for pattern in project.get("license-files", []):
+        inputs.update(path.relative_to(source).as_posix() for path in source.glob(pattern))
+    destination.mkdir(parents=True)
+    for name in inputs:
+        target = (destination / name).resolve()
+        if not target.is_relative_to(destination.resolve()):
+            raise ValueError("构建输入路径不在项目内")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source / name, target)
+    shutil.copytree(source / "src", destination / "src")
 
 
 def build_version(directory: Path, version: dict, values: dict) -> None:
@@ -114,12 +122,8 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
                 sources[item["name"]]["subdirectory"] = subdirectory[0]
         elif "directory" in location or "editable" in location:
             dependency = (directory / location.get("directory", location.get("editable"))).resolve()
-            if not dependency.is_relative_to(Path("/shared/projects")):
-                raise ValueError("本地源码依赖必须位于 /shared/projects")
-            frozen = target / "dependencies" / item["name"]
-            copy_source(dependency, frozen)
             destination = wheels / item["name"]
-            command(["uv", "build", "--wheel", "--out-dir", str(destination), str(frozen)], target)
+            command(["uv", "build", "--wheel", "--out-dir", str(destination), str(dependency)], target)
             sources[item["name"]] = {"path": str(next(destination.glob("*.whl")))}
         elif "path" in location:
             original = (directory / location["path"]).resolve()
@@ -166,7 +170,7 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
     if any({"directory", "editable"} & p["source"].keys() for p in frozen_lock["package"]):
         raise ValueError("正式环境仍包含未冻结的源码依赖")
     component = {"package": package, "version": version["packageVersion"], "wheel": str(wheel),
-                 "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(), "entry": parameters_result["entry"]}
+                 "entry": parameters_result["entry"]}
     data = {"environment": {"lockfile": str(environment / "uv.lock")}, "output": str(target / "report")}
     if "factor" in parameters_result:
         data.update(kind="factor", factor={**component, "params": parameters_result["factor"]},
@@ -178,8 +182,7 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
             if "path" not in location:
                 raise ValueError(f"上游 {upstream['package']} 缺少冻结 wheel，请通过插件安装项目后重试")
             upstream_wheel = Path(location["path"])
-            components[kind] = {**upstream, "wheel": str(upstream_wheel),
-                                "sha256": hashlib.sha256(upstream_wheel.read_bytes()).hexdigest()}
+            components[kind] = {**upstream, "wheel": str(upstream_wheel)}
         data.update(kind=parameters_result["project_kind"], algos=components, backtest=parameters_result["backtest"])
     (target / "input.json").write_text(json.dumps(data, ensure_ascii=False, indent=2))
     (target / "build.json").write_text(json.dumps({"scheme_version": installed["version"]}))
@@ -211,10 +214,6 @@ async def _save(directory: Path, project: dict, version: dict, values: dict) -> 
 
 async def save(directory: Path, project: dict, version: dict, values: dict) -> None:
     with project_operation(project["project_id"]):
-        root = directory
-        for _ in Path(project["path"]).parts:
-            root = root.parent
-        await recover_installation(root, project)
         await _save(directory, project, version, values)
 
 
@@ -231,7 +230,6 @@ class VersionsHandler(DependenciesHandler):
         project = self.current_project(self.get_query_argument("path", ""))
         if self.get_query_argument("parameters", "") == "1":
             with project_operation(project["project_id"]):
-                await recover_installation(Path(self.settings["server_root_dir"]), project)
                 await check_project_release(project["project_id"])
                 directory = Path(self.settings["server_root_dir"]) / project["path"]
                 try:
@@ -262,7 +260,6 @@ class VersionsHandler(DependenciesHandler):
         operation.__enter__()
         transferred = False
         try:
-            await recover_installation(Path(self.settings["server_root_dir"]), project)
             await check_project_release(project["project_id"])
             directory = Path(self.settings["server_root_dir"]) / project["path"]
             try:

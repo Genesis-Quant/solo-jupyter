@@ -63,16 +63,15 @@ class SoloProjectConfig(ConfigSource):
         venv = project / ".venv"
         python = venv / "bin/python"
         try:
-            files = (marker, manifest, venv / "pyvenv.cfg")
-            if not all(path.is_file() and path.resolve().is_relative_to(project) for path in files):
+            if not all(path.is_file() and path.resolve().is_relative_to(project) for path in (marker, manifest)):
                 return {}
-            if not source.is_dir() or not source.resolve().is_relative_to(project) or venv.resolve() != venv:
+            if not (venv / "pyvenv.cfg").is_file():
                 return {}
-            if marker.stat().st_size > 65536 or not python.is_file() or not os.access(python, os.X_OK):
+            if not python.is_file() or not os.access(python, os.X_OK):
                 return {}
             metadata = json.loads(marker.read_text(encoding="utf-8"))
             UUID(metadata["project_id"])
-            if metadata["name"] != project.name or metadata["kind"] != project.parent.name:
+            if metadata["kind"] != project.parent.name:
                 return {}
         except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError):
             return {}
@@ -86,15 +85,7 @@ class SoloProjectConfig(ConfigSource):
         project = self.project_path(document_path)
         if project is None:
             return
-        paths = [project / name for name in (".solo", "pyproject.toml", "uv.lock", "src", ".venv", ".venv/pyvenv.cfg", ".venv/bin/python")]
-        try:
-            sites = sorted((project / ".venv/lib").glob("python*/site-packages"))
-            paths.extend(sites)
-            for site in sites:
-                paths.extend(sorted(site.glob("*.pth")))
-        except OSError:
-            pass
-        signature = tuple((str(path), self._stamp(path)) for path in paths)
+        signature = tuple(self._stamp(project / name) for name in (".venv/bin/python", "uv.lock"))
         with self._lock:
             if self._signatures.get(project) != signature:
                 self._signatures[project] = signature
@@ -143,9 +134,7 @@ class SoloProjectConfig(ConfigSource):
     @staticmethod
     def _stamp(path):
         try:
-            stat = path.stat()
-            link = path.lstat()
-            return (stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, link.st_ino, link.st_mtime_ns)
+            return path.stat().st_mtime_ns
         except OSError:
             return None
 

@@ -17,7 +17,7 @@ from solo_jupyter.uv import uv_environment
 @pytest.mark.parametrize("relative, volume", [
     ("projects", "projects"),
     ("projects/model/current", "projects"),
-    ("projects/model/.solo-install-test/stage", "projects"),
+    ("projects/model/current/nested", "projects"),
     ("runs", "runs"),
     ("runs/frozen-build", "runs"),
     ("runs/frozen-build/environment", "runs"),
@@ -77,7 +77,7 @@ def inherited_environment(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("relative, cache_relative", [
     ("projects/model/current", "projects/.uv-cache"),
-    ("projects/model/.solo-install-test/stage", "projects/.uv-cache"),
+    ("projects/model/current/nested", "projects/.uv-cache"),
     ("runs/frozen-build", "runs/.uv-cache"),
     ("runs/frozen-build/environment", "runs/.uv-cache"),
     ("artifacts/release/environment", "artifacts/.uv-cache"),
@@ -110,7 +110,7 @@ def test_versions_command_passes_routed_hardlink_environment_to_subprocess(
 
 @pytest.mark.parametrize("mode", ["source", "artifact"])
 @pytest.mark.parametrize("shared", [True, False], ids=["shared-mount", "outside-shared"])
-@pytest.mark.parametrize("accept_failure", [False, True], ids=["commit", "rollback"])
+@pytest.mark.parametrize("accept_failure", [False, True], ids=["success", "rollback"])
 def test_install_common_subprocesses_share_own_directory_cache(
     tmp_path, monkeypatch, inherited_environment, mode, shared, accept_failure,
 ):
@@ -138,16 +138,9 @@ def test_install_common_subprocesses_share_own_directory_cache(
     (source / "pyproject.toml").write_text(tomlkit.dumps(source_config), encoding="utf-8")
     wheel = source / "source_package-1.2.7-py3-none-any.whl"
     wheel.write_bytes(b"test wheel")
-    installation = SimpleNamespace(install_id=str(uuid4()), protect=AsyncMock(), start=Mock(), stop=AsyncMock(),
-                                   failure=None, failure_cancelled_owner=False)
-    monkeypatch.setattr(dependencies, "_ArtifactInstallation", lambda _: installation)
-    operation = "abort" if accept_failure else "complete"
-    finalize = AsyncMock(return_value={"install_id": installation.install_id,
-                                     "aborted" if accept_failure else "completed": True})
-    monkeypatch.setattr(dependencies, "_artifact_api", finalize)
-    monkeypatch.setattr(dependencies, "_installed_artifacts", AsyncMock(return_value=[]))
     accept = AsyncMock(side_effect=RuntimeError("accept rejected") if accept_failure else None)
-    monkeypatch.setattr(dependencies, "_accept_dependencies", accept)
+    monkeypatch.setattr(dependencies, "_artifact_api", accept)
+    monkeypatch.setattr(dependencies, "_installed_artifacts", AsyncMock(return_value=[]))
     metadata = {"python": sys.executable, "markers": {"python_version": "3.12", "python_full_version": "3.12.12"},
                 "packages": [{"name": "scheme", "version": "1.2.0", "requires": []}]}
     calls = []
@@ -165,16 +158,17 @@ def test_install_common_subprocesses_share_own_directory_cache(
 
     async def freeze(*arguments):
         await dependencies._run(["uv", "build", "--wheel"], arguments[3], arguments[5])
-        return wheel, {}, {}
+        return wheel, {}, {"source-package": {"id": str(uuid4()), "version": "1.2.7", "package": "source-package", "filename": wheel.name}}
 
     monkeypatch.setattr(dependencies, "_freeze_runtime", freeze)
-    monkeypatch.setattr(dependencies, "_stage_artifact_graph", AsyncMock(return_value=({"source-package": wheel}, {})))
+    monkeypatch.setattr(dependencies, "_stage_artifact_graph", AsyncMock(return_value=({"source-package": wheel}, {
+        "source-package": {"id": str(uuid4()), "version": "1.2.7", "package": "source-package", "filename": wheel.name}})))
     options = {"source_directory": source} if mode == "source" else {"artifact": {"package": "source-package"}}
     if accept_failure:
         with pytest.raises(RuntimeError, match="accept rejected"):
             asyncio.run(dependencies._install_common(root, current, "source-package", **options))
         assert {name: (directory / name).read_bytes() for name in original} == original
-        assert interpreter.read_bytes() == b"original environment"
+        assert interpreter.read_bytes() == b"new environment"
     else:
         assert asyncio.run(dependencies._install_common(root, current, "source-package", **options)) == "source-package"
         assert interpreter.read_bytes() == b"new environment"
@@ -182,28 +176,21 @@ def test_install_common_subprocesses_share_own_directory_cache(
     assert tomllib.loads((directory / "pyproject.toml").read_text(encoding="utf-8"))["tool"]["uv"]["index"] == config["tool"]["uv"]["index"]
     expected_cache = root / "projects/.uv-cache" if shared else directory.parent / ".uv-cache"
     assert calls
+    assert len([arguments for arguments, _, _ in calls if "-c" in arguments]) == 1
+    assert "-c" in calls[0][0]
+    assert not any(arguments[:2] == ("uv", "pip") for arguments, _, _ in calls)
     for arguments, cwd, environment in calls:
         assert environment["UV_LINK_MODE"] == "hardlink"
         assert environment["UV_CACHE_DIR"] == str(expected_cache)
         assert environment["GIT_TERMINAL_PROMPT"] == "0"
-        assert cwd == directory or cwd.is_relative_to(directory.parent)
+        assert cwd == directory or cwd.name.startswith("solo-install-")
         for name in ("VIRTUAL_ENV", "PYTHONPATH", "PYTHONHOME", "UV_WORKING_DIR", "UV_PROJECT"):
             assert name not in environment
         for name in ("UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX", "UV_OFFLINE"):
             assert environment[name] == inherited_environment[name]
     sync_calls = [(cwd, environment) for arguments, cwd, environment in calls if arguments[:2] == ("uv", "sync")]
-    assert len(sync_calls) == 2
-    stage, stage_environment = sync_calls[0]
-    assert stage.name == "stage" and stage.parent.parent == directory.parent
-    assert stage_environment["UV_PROJECT_ENVIRONMENT"] == str(stage / ".venv")
-    assert sync_calls[1][0] == directory
-    assert sync_calls[1][1]["UV_PROJECT_ENVIRONMENT"] == str(directory / ".venv")
-    assert stage_environment["UV_PYTHON"] == sys.executable
-    installation.protect.assert_awaited_once_with()
-    accept.assert_awaited_once_with(current, [], installation)
-    finalize.assert_awaited_once_with(
-        f'projects/{current["project_id"]}/dependencies/installations/{installation.install_id}/{operation}', {})
-    assert not (directory / dependencies._INSTALLATION_INTENT).exists()
-    assert not list(directory.parent.glob(".solo-install-*"))
-    assert not dependencies._installing
+    assert len(sync_calls) == (2 if accept_failure else 1)
+    assert all(cwd == directory for cwd, _ in sync_calls)
+    assert all("UV_PROJECT_ENVIRONMENT" not in environment for _, environment in sync_calls)
+    accept.assert_awaited_once_with(f'projects/{current["project_id"]}/dependencies', {"artifacts": []})
     assert all(os.environ[name] == value for name, value in inherited_environment.items())

@@ -1,18 +1,32 @@
 # 因子评价与 Arena 对照
 
-来源：Arena `backend/docs/factor/request.md`、`overview/dsl.md`（参考提交 `802cb0fd4ef45a0fc7db6168b96497de68eda537`）；Solo Scheme 1.5.0 `execute/factor/api.py`。这是口径说明，不代表未来版本保持不变。
+来源：Arena `backend/docs/factor/request.md`、`overview/dsl.md`（参考提交 `802cb0fd4ef45a0fc7db6168b96497de68eda537`）；Solo Scheme 提供 `max_lag` 的 `base/projects/factor/params.py` 与 `execute/factor/api.py`。这是口径说明，项目安装版本与实际报告参数优先。
 
 ## Solo 标签
 
-当前实现使用 `adjusted_close = close * adj_factor`，N交易日simple标签：
+新版 `max_lag` 默认1，要求严格正整数，不接受bool；不再用 `return_periods` 配置新分析。使用 `O_adj = open * adj_factor`、`C_adj = close * adj_factor`，对每个 `k=1..max_lag` 生成两列单段simple收益：
 
 ```text
-return_N(t) = adjusted_close(t+N) / adjusted_close(t) - 1
+r{k-1}o(t) = O_adj(t+k) / C_adj(t+k-1) - 1  # overnight
+r{k}(t)   = C_adj(t+k) / O_adj(t+k) - 1    # intraday
 ```
 
-`[start,end)` 的行情截止到 `end-1日`，不额外读取结束日之后的数据。末尾不足N个交易日的标签为NULL。不要将NULL填0用于IC、均值、胜率或分组收益；这些行仍可保留因子值、分组和适用的换手信息。
+`t+k` 按交易日而非自然日计。各列既不是close-to-close累计收益，也不是log收益。`max_lag=2` 用到 `t,t+1,t+2` 三个交易日，依次输出：
 
-交易决策不能引用这个未来标签。回测中历史查询必须受当时可知时间约束；整个研究区间内“存在”不代表每个回调时刻都可见。
+| 列 | 单段价格区间 | lag | session | turnover_period |
+| --- | --- | --- | --- | --- |
+| `r0o` | `C_adj(t) -> O_adj(t+1)` | 0 | overnight | 1 |
+| `r1` | `O_adj(t+1) -> C_adj(t+1)` | 1 | intraday | 1 |
+| `r1o` | `C_adj(t+1) -> O_adj(t+2)` | 1 | overnight | 2 |
+| `r2` | `O_adj(t+2) -> C_adj(t+2)` | 2 | intraday | 2 |
+
+默认 `max_lag=1` 仅有 `r0o,r1`。`params.return_columns` 提供上述顺序；`params.return_specs` 每项均为 `kind="simple"`、`periods=1`，加上表中的lag、session和turnover_period。标签数字是lag，不能把它当成累计持有期。
+
+`[start,end)` 的行情截止到 `end-1日`，不读取end及其后的数据。尾部某个k不可用时，其对应两列为NULL，较早k仍可能有效。例如只剩 `t,t+1` 时，`r0o/r1` 可有效而 `r1o/r2` 为NULL；最后一个交易日的未来标签全部为NULL。不要将NULL填0用于IC、均值、胜率或分组收益；这些行仍可保留因子值、分组和适用的换手信息。
+
+旧版只含 `return_periods` 的参数和报告继续使用 `return_N(t)=C_adj(t+N)/C_adj(t)-1` 及原规格；桥接不将它们转换为新标签，不升级旧环境或篡改历史。
+
+交易决策不能引用这些未来标签。回测中历史查询必须受当时可知时间约束；整个研究区间内“存在”不代表每个回调时刻都可见。
 
 ## 预处理
 
@@ -37,7 +51,7 @@ Solo当前分析器没有隐式执行Arena整套MAD、z-score、log市值与行�
 
 - IC是当日因子与未来收益的相关；RankIC使用排序相关，具体ties/缺失规则核对当前实现。
 - ICIR按当前模块定义的均值/样本标准差，不无依据乘 `sqrt(252)`。
-- 多期标签彼此重叠，逐日均值或连乘不是可交易组合净值。收益年化需清楚的组合持有/换仓方案。
+- 不同lag的单段隔夜/日内标签不是完整日收益；逐日均值或连乘不是可交易组合净值，旧版重叠 `return_N` 也不例外。收益年化需清楚的组合持有/换仓方案。
 - 分组/集合换手衡量样本集合变化，不自动等于真实成交额换手；费用与冲击要通过交易模拟另验。
 - 小样本、零方差、空截面导致的NULL应披露，不转换成看似良好的0风险指标。
 

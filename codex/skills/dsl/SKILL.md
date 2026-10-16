@@ -34,14 +34,14 @@ description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到
 
 这些命令只读取已安装 Runtime 的模型与注册表，不连接 DolphinDB、不写数据库、不安装依赖，也不加载 `.env`。先用 `--help` 核对可选参数。Windows 项目把解释器换为 `.venv/Scripts/python.exe`。
 
-字段目录同时返回 `configuration`，先检查 `source`：`option` 为显式参数，`environment` 为已导出的 `INDEX_CODES`，`runtime-defaults` 只表示包的默认值，不代表项目 `.env`。需要指数权重字段时，先取得该项目已确认的非敏感指数配置，通过 `--index-codes` 在子命令**之前**传入（优先于环境变量），例如：
+字段目录同时返回 `configuration`，先检查 `source`：`option` 为显式参数，`environment` 为已导出的 `INDEX_CODES`，`runtime-defaults` 只表示包的默认值，不代表项目 `.env`。未显式配置时直接使用 Runtime 默认目录并给出提示；目录中已有指数权重字段正常校验。需要选择其它指数时，取得项目已确认的非敏感配置，通过 `--index-codes` 在子命令**之前**传入（优先于环境变量），例如：
 
 ```bash
 .venv/bin/python "$HELPER" --index-codes '000016.SH,000300.SH,000905.SH,000852.SH' factors
 .venv/bin/python "$HELPER" --index-codes '123456.SH' validate request.json
 ```
 
-例子不是所有项目的默认配置；不要仅为通过校验把请求中出现的指数拼进配置。不需要改变项目 `.env` 或导出密码。仅有包默认配置时，helper 对权重依赖返回 `index_configuration_required` 而不是误判未知字段；静态字段和结构校验仍可使用。`factors`／`operators` 的默认目录带明确警告，不能当作当前项目已确认的权重白名单。
+例子不是所有项目的默认配置；不要仅为通过校验把请求中出现的指数拼进配置。不需要改变项目 `.env` 或导出密码。`factors`／`operators` 和校验结果的默认配置提示不阻止已有字段使用；默认目录不证明项目 `.env` 的有效配置，目录中不存在的字段仍返回未知字段。
 
 1. 明确最终需要的列、日期、代码范围、最长窗口；不要把每步中间值变成输出列。
 2. 读取基础字段白名单。字段可用不代表所有代码和日期都有非空数据。

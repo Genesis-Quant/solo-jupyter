@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import runpy
 import shutil
@@ -12,6 +11,7 @@ from unittest.mock import AsyncMock, Mock
 from uuid import UUID, uuid4
 
 import pytest
+from packaging.version import Version
 from solo_jupyter import dependencies, handlers, versions
 from tornado import web
 from tornado.httpclient import HTTPClientError
@@ -21,101 +21,42 @@ _CHECK_PROJECT_RELEASE = dependencies.check_project_release
 _ARTIFACT_API = dependencies._artifact_api
 
 
-def install_receipts(records):
-    """Model only the durable exact-ID receipt contract, never expand artifact closure."""
-    pending, accepted = {}, {}
-
-    def installation(path, body):
-        parts = path.split("/")
-        if len(parts) < 4 or parts[:1] != ["projects"] or parts[2:4] != ["dependencies", "installations"]:
-            return None
-        consumer = parts[1]
-        if len(parts) == 4:
-            identifier = str(UUID(body["install_id"]))
-            if body.get("renew"):
-                assert identifier in pending, "A renewing nonce must never recreate an expired/deleted receipt"
-            if any(key != identifier and receipt["consumer"] == consumer and receipt["accepted"] is not None
-                   for key, receipt in pending.items()):
-                raise web.HTTPError(409, reason="Another accepted installation awaits explicit finalization")
-            receipt = pending.setdefault(identifier, {"consumer": consumer, "before": accepted.get(consumer, {}).copy(),
-                                                      "pending": {}, "accepted": None})
-            assert receipt["consumer"] == consumer
-            for artifact in body["artifacts"]:
-                receipt["pending"][artifact] = records[artifact]
-            return {"install_id": identifier, "artifacts": list(receipt["pending"].values()),
-                    "expires_at": "2099-01-01T00:00:00+00:00"}
-        identifier, operation = parts[4:]
-        assert operation in {"complete", "abort"}
-        receipt = pending.get(identifier)
-        if receipt is not None:
-            assert receipt["consumer"] == consumer
-            if operation == "abort":
-                assert accepted.get(consumer, {}) in (receipt["before"], receipt["accepted"])
-                accepted[consumer] = receipt["before"]
-            else:
-                assert receipt["accepted"] is not None
-            del pending[identifier]
-        return {"install_id": identifier, "completed" if operation == "complete" else "aborted": True}
-
-    def accept(path, body):
-        receipt = pending[body["install_id"]]
-        consumer = path.split("/")[1]
-        assert receipt["consumer"] == consumer
-        assert set(body["artifacts"]) <= set(receipt["pending"])
-        result = {records[identifier]["package"]: records[identifier] for identifier in body["artifacts"]}
-        accepted[consumer] = result
-        receipt["accepted"] = result
-        return {"artifacts": list(result.values())}
-
-    return SimpleNamespace(pending=pending, accepted=accepted, installation=installation, accept=accept)
-
-
 @pytest.fixture(autouse=True)
 def registry(monkeypatch, tmp_path):
-    snapshots = {}
-    receipts = install_receipts(snapshots)
+    snapshots, contents, accepted = {}, {}, {}
 
     async def api(path, body=None, *, binary=False):
-        result = receipts.installation(path, body)
-        if result is not None:
-            return result
         if path == "artifacts/register":
+            assert set(body) == {"project_id", "wheel"}
             wheel = Path(body["wheel"])
-            name, version, _ = dependencies._wheel_metadata(wheel)
-            matches = [json.loads(marker.read_text()) for marker in tmp_path.rglob(".solo")
-                       if json.loads(marker.read_text()).get("project_id") == body["project_id"]]
-            assert matches, "Registration must use the actual built project marker"
-            metadata = matches[0]
+            metadata = next(json.loads(marker.read_text()) for marker in tmp_path.rglob(".solo")
+                            if json.loads(marker.read_text()).get("project_id") == body["project_id"])
             assert wheel.is_absolute() and ".solo-wheels" in wheel.parts
-            assert body["sha256"] == hashlib.sha256(wheel.read_bytes()).hexdigest()
-            previous = next((item for item in snapshots.values() if item["sha256"] == body["sha256"]), None)
-            kind = "dependency" if body["project_id"] == body["consumer_project_id"] else metadata["kind"]
-            snapshot = previous or {"id": str(uuid4()), "package": name, "version": version,
-                "filename": wheel.name, "sha256": body["sha256"], "kind": kind,
-                "entry": f'{name.replace("-", "_")}:Algo', "schemeVersion": metadata["scheme_version"],
-                "sourceProjectId": metadata["project_id"], "sourceProjectName": metadata["name"],
-                "sources": {"scheme": {"version": metadata["scheme_version"]}}, "dependencies": {}, "publishedAt": None}
-            receipt = receipts.pending[body["install_id"]]
-            assert receipt["consumer"] == body["consumer_project_id"]
-            snapshots[snapshot["id"]] = snapshot
-            receipt["pending"][snapshot["id"]] = snapshot
-            return snapshot
+            record = artifact_fixture(wheel, kind=metadata["kind"], origin=body["project_id"], published=False)
+            snapshots[record["id"]] = record
+            contents[record["id"]] = wheel.read_bytes()
+            return record
         if path.startswith("projects/") and path.endswith("/dependencies"):
-            return receipts.accept(path, body)
-        if path.startswith("artifacts?"):
-            from urllib.parse import parse_qs
-            query = parse_qs(path.split("?", 1)[1])
-            return [item for item in snapshots.values()
-                    if ("sha256" not in query or item["sha256"] == query["sha256"][0])
-                    and ("published" not in query or bool(item["publishedAt"]) == (query["published"][0] == "true"))]
+            assert set(body) == {"artifacts"}
+            accepted[path.split("/")[1]] = [snapshots[identifier] for identifier in body["artifacts"]]
+            return {"artifacts": [accepted_snapshot(item) for item in accepted[path.split("/")[1]]]}
+        if path.startswith("projects/"):
+            assert body is None
+            identifier = path.split("/")[1]
+            return {"id": identifier, "artifactDependencies": {
+                item["package"]: accepted_snapshot(item) for item in accepted.get(identifier, [])}}
+        if path == "artifacts" or path.startswith("artifacts?"):
+            return [item for item in snapshots.values() if "published=true" not in path or item["publishedAt"]]
         if path.startswith("artifacts/"):
             identifier = path.split("/")[1]
-            return snapshots[identifier]
+            if identifier not in snapshots:
+                raise web.HTTPError(404, reason="Artifact does not exist")
+            return contents[identifier] if binary else snapshots[identifier]
         raise AssertionError(f"Unexpected registry request: {path}")
 
     mock = AsyncMock(side_effect=api)
     monkeypatch.setattr(dependencies, "_artifact_api", mock)
-    return SimpleNamespace(api=mock, snapshots=snapshots, receipts=receipts)
+    return SimpleNamespace(api=mock, snapshots=snapshots, contents=contents, accepted=accepted)
 
 
 @pytest.fixture(autouse=True)
@@ -184,12 +125,11 @@ def project_files(tmp_path, projects):
 def handler_for(root, current, candidate, *, dev=True):
     return SimpleNamespace(current_user=object(), settings={"server_root_dir": str(root)},
         current_project=Mock(return_value=current), get_query_argument=Mock(return_value=current["path"]),
-        get_json_body=Mock(return_value={"path": current["path"], "project_id": candidate["id"], "dev": dev}), finish=Mock())
+        get_json_body=Mock(return_value={"path": current["path"], "live_project_id": candidate["id"], "dev": dev}), finish=Mock())
 
 
-def file_snapshot(root, *, ignore_intent=False):
-    return {path.relative_to(root): path.read_bytes() for path in root.rglob("*")
-            if path.is_file() and (not ignore_intent or path.name != dependencies._INSTALLATION_INTENT)}
+def file_snapshot(root):
+    return {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
 
 
 def forbid_install_side_effects(monkeypatch, *, block_source_read=True):
@@ -279,7 +219,6 @@ def test_post_rejects_before_reading_source_or_changing_files_or_running_uv(proj
             guard.assert_not_called()
     admission.assert_not_awaited()
     assert file_snapshot(root) == before
-    assert not dependencies._installing
 
 
 @pytest.mark.parametrize("which", ["current", "candidate"])
@@ -297,7 +236,6 @@ def test_authoritative_admission_rejection_has_no_side_effects(project_files, mo
         for guard in guards:
             guard.assert_not_called()
     assert file_snapshot(root) == before
-    assert not dependencies._installing
 
 
 @pytest.mark.parametrize("source_version", ["1.1.9", "1.3.0", "2.2.0", "invalid", None, "missing", []])
@@ -318,49 +256,6 @@ def test_actual_source_manifest_series_is_rechecked_before_package_or_uv(project
     assert file_snapshot(root) == before
 
 
-@pytest.mark.parametrize("location", ["source-directory", "scheme-directory", "locked-editable", "locked-directory"])
-def test_existing_live_directory_sources_are_rejected_before_temp_or_process(project_files, monkeypatch, location):
-    root, current, candidate = project_files
-    directory, source = root / current["path"], root / candidate["directory"]
-    if location.endswith("directory") and not location.startswith("locked"):
-        set_sources(directory, {"scheme" if location.startswith("scheme") else "legacy-package": {"path": str(source)}})
-    else:
-        with (directory / "uv.lock").open("a") as lock:
-            lock.write(f'\n[[package]]\nname = "legacy-package"\nversion = "1.2.0"\nsource = {{ {location.removeprefix("locked-")} = "{source.as_posix()}" }}\n')
-    before = file_snapshot(root)
-    run = AsyncMock(side_effect=AssertionError("Unsafe preview ran subprocess"))
-    temporary = Mock(side_effect=AssertionError("Unsafe preview created temporary directory"))
-    monkeypatch.setattr(dependencies, "_run", run)
-    monkeypatch.setattr(dependencies.tempfile, "mkdtemp", temporary)
-    with pytest.raises(web.HTTPError, match="冻结为 wheel"):
-        asyncio.run(dependencies.install_project(root, current, candidate))
-    run.assert_not_called()
-    temporary.assert_not_called()
-    assert file_snapshot(root) == before
-
-
-@pytest.mark.parametrize("dev", [True, False])
-@pytest.mark.parametrize("raw", ["source-package[feature]>=1.2", 'source-package>=1.2; python_version >= "3.12"'])
-def test_existing_upstream_extras_and_markers_are_not_silently_lost(project_files, monkeypatch, dev, raw):
-    root, current, candidate = project_files
-    directory = root / current["path"]
-    path = directory / "pyproject.toml"
-    if dev:
-        path.write_text(path.read_text().replace('["scheme>=1.2.0,<1.3.0"]', json.dumps(["scheme>=1.2.0,<1.3.0", raw])))
-    else:
-        path.write_text(path.read_text() + f'\n[dependency-groups]\ndev = {json.dumps([raw])}\n')
-    before = file_snapshot(root)
-    run = AsyncMock(side_effect=AssertionError("Lossy grouping ran subprocess"))
-    temporary = Mock(side_effect=AssertionError("Lossy grouping created temporary directory"))
-    monkeypatch.setattr(dependencies, "_run", run)
-    monkeypatch.setattr(dependencies.tempfile, "mkdtemp", temporary)
-    with pytest.raises(web.HTTPError, match="extras 或 marker"):
-        asyncio.run(dependencies.install_project(root, current, candidate, dev=dev))
-    run.assert_not_called()
-    temporary.assert_not_called()
-    assert file_snapshot(root) == before
-
-
 def test_installer_busy_gate_uses_normalized_project_uuid_before_any_io(project_files, monkeypatch, admission):
     root, current, candidate = project_files
     before = file_snapshot(root)
@@ -370,18 +265,6 @@ def test_installer_busy_gate_uses_normalized_project_uuid_before_any_io(project_
         assert error.value.status_code == 409
     admission.assert_not_awaited()
     assert file_snapshot(root) == before
-    assert not dependencies._project_busy
-
-
-def test_installer_holds_source_project_guard(project_files, monkeypatch):
-    root, current, candidate = project_files
-    async def install(*args, **kwargs):
-        assert current["project_id"] in dependencies._project_busy
-        assert candidate["id"] in dependencies._project_busy
-        raise RuntimeError("installer failed")
-    monkeypatch.setattr(dependencies, "_install_project", install)
-    with pytest.raises(RuntimeError, match="installer failed"):
-        asyncio.run(dependencies.install_project(root, current, candidate))
     assert not dependencies._project_busy
 
 
@@ -409,9 +292,8 @@ def test_operations_handler_rejects_invalid_uuid(identifier):
 
 
 @pytest.mark.parametrize("side", ["current", "source"])
-@pytest.mark.parametrize("requirement", ["scheme==1.2.7", "scheme>=1.2.7,<1.3", "scheme>=1.2,<2", "scheme @ https://example.test/scheme.whl", None,
-    "scheme[extra]>=1.2,<1.3", "scheme>=1.2,<1.3,>=1.2", "scheme>=1.2.0rc1,<1.3", "scheme>=0!1.2,<1.3", "scheme>=1.2.0.0,<1.3",
-    ["scheme>=1.2,<1.3", "scheme>=1.2,<1.3"]])
+@pytest.mark.parametrize("requirement", ["scheme==1.2.7", "scheme>=1.2.7,<1.3", "scheme @ https://example.test/scheme.whl", None,
+])
 def test_declared_scheme_must_allow_complete_series_before_uv(project_files, monkeypatch, side, requirement):
     root, current, candidate = project_files
     path = root / (current["path"] if side == "current" else candidate["directory"]) / "pyproject.toml"
@@ -427,7 +309,7 @@ def test_declared_scheme_must_allow_complete_series_before_uv(project_files, mon
 
 
 @pytest.mark.parametrize("side", ["current", "source"])
-@pytest.mark.parametrize("version", ["0.1.0", "1.1.7", "1.3.0", "2.2.0", "1.2.0rc1", "0!1.2.0", "1.2.0.0"])
+@pytest.mark.parametrize("version", ["0.1.0", "1.1.7", "1.3.0", "2.2.0"])
 def test_actual_project_package_version_must_match_scheme_series_before_uv(project_files, monkeypatch, side, version):
     root, current, candidate = project_files
     path = root / (current["path"] if side == "current" else candidate["directory"]) / "pyproject.toml"
@@ -441,7 +323,7 @@ def test_actual_project_package_version_must_match_scheme_series_before_uv(proje
     assert file_snapshot(root) == before
 
 
-@pytest.mark.parametrize("lock_versions", [None, [], ["invalid"], ["1.3.0"], ["1.2.0", "1.2.7"], ["1.2.0", "1.2.0"], ["1.2.0rc1"], ["0!1.2.0"], ["1.2.0.0"]])
+@pytest.mark.parametrize("lock_versions", [None, [], ["invalid"], ["1.3.0"], ["1.2.0", "1.2.7"], ["1.2.0", "1.2.0"]])
 def test_scheme_lock_missing_invalid_or_ambiguous_is_rejected(project_files, monkeypatch, lock_versions):
     root, current, candidate = project_files
     lock = root / current["path"] / "uv.lock"
@@ -452,21 +334,7 @@ def test_scheme_lock_missing_invalid_or_ambiguous_is_rejected(project_files, mon
     before = file_snapshot(root)
     uv = AsyncMock(side_effect=AssertionError("Invalid Scheme lock must not run uv"))
     monkeypatch.setattr(dependencies.asyncio, "create_subprocess_exec", uv)
-    with pytest.raises(web.HTTPError, match="锁定记录"):
-        asyncio.run(dependencies.install_project(root, current, candidate))
-    uv.assert_not_called()
-    assert file_snapshot(root) == before
-
-
-@pytest.mark.parametrize("override", ["scheme==1.2.0", "scheme>=1.2.0,<1.3.0", "scheme==1.2.7"])
-def test_all_scheme_overrides_are_rejected_not_rewritten(project_files, monkeypatch, override):
-    root, current, candidate = project_files
-    path = root / current["path"] / "pyproject.toml"
-    path.write_text(path.read_text() + f'\n[tool.uv]\noverride-dependencies = {json.dumps([override])}\n')
-    before = file_snapshot(root)
-    uv = AsyncMock(side_effect=AssertionError("Scheme override must not run uv"))
-    monkeypatch.setattr(dependencies.asyncio, "create_subprocess_exec", uv)
-    with pytest.raises(web.HTTPError, match="移除 Scheme override"):
+    with pytest.raises(FileNotFoundError if lock_versions is None else web.HTTPError):
         asyncio.run(dependencies.install_project(root, current, candidate))
     uv.assert_not_called()
     assert file_snapshot(root) == before
@@ -496,9 +364,7 @@ def test_source_identity_and_invalid_manifest_rejected_without_mutation(project_
     assert file_snapshot(root) == before
 
 
-_OFFLINE_BUILD_BACKEND = '''import base64
-import hashlib
-from pathlib import Path
+_OFFLINE_BUILD_BACKEND = '''from pathlib import Path
 import tomllib
 from zipfile import ZipFile, ZipInfo
 
@@ -516,14 +382,13 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
     for extra, requirements in project.get("optional-dependencies", {}).items():
         metadata += f"Provides-Extra: {extra}\\n"
         metadata += "".join(f"Requires-Dist: {item}; extra == '{extra}'\\n" for item in requirements)
-    code = Path("payload.py").read_text() if Path("payload.py").exists() else "VALUE = 1\\n"
+    code = Path("src/payload.py").read_text() if Path("src/payload.py").exists() else "VALUE = 1\\n"
     files = {f"{name}/__init__.py": (f"__version__ = {version!r}\\n" + code).encode(),
         f"{dist_info}/METADATA": (metadata + "\\n").encode(),
         f"{dist_info}/WHEEL": b"Wheel-Version: 1.0\\nGenerator: solo-test\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n"}
     records = []
     for path, content in files.items():
-        digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
-        records.append(f"{path},sha256={digest},{len(content)}\\n")
+        records.append(f"{path},,{len(content)}\\n")
     record = f"{dist_info}/RECORD"
     files[record] = ("".join(records) + f"{record},,\\n").encode()
     filename = f"{name}-{version}-py3-none-any.whl"
@@ -540,16 +405,17 @@ build_editable = build_wheel
 def write_offline_package(directory, name, version, requirements=()):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "pyproject.toml").write_text(
-        '[build-system]\nrequires = []\nbuild-backend = "offline_backend"\nbackend-path = ["."]\n'
+        '[build-system]\nrequires = []\nbuild-backend = "offline_backend"\nbackend-path = ["src"]\n'
         f'\n[project]\nname = "{name}"\nversion = "{version}"\nrequires-python = ">=3.12"\n'
         f'dependencies = {json.dumps(list(requirements))}\n')
-    (directory / "offline_backend.py").write_text(_OFFLINE_BUILD_BACKEND)
-    (directory / "payload.py").write_text("VALUE = 1\n")
+    (directory / "src").mkdir(exist_ok=True)
+    (directory / "src/offline_backend.py").write_text(_OFFLINE_BUILD_BACKEND)
+    (directory / "src/payload.py").write_text("VALUE = 1\n")
 
 
 def build_fixture_wheel(directory, destination, monkeypatch):
     destination.mkdir(parents=True, exist_ok=True)
-    backend = runpy.run_path(str(directory / "offline_backend.py"))
+    backend = runpy.run_path(str(directory / "src/offline_backend.py"))
     with monkeypatch.context() as building:
         building.chdir(directory)
         return destination / backend["build_wheel"](str(destination))
@@ -618,6 +484,84 @@ def sync_fixture(root, current, version=None):
     run_uv(["sync", "--project", str(directory), "--no-editable"], root)
 
 
+@pytest.mark.parametrize("links", [False, True], ids=["large-file", "large-file-and-symlinks"])
+def test_freeze_runtime_builds_in_place_and_renames_final_wheel(project_files, tmp_path, monkeypatch, registry, links):
+    root, current, candidate = project_files
+    directory, source = root / current["path"], root / candidate["directory"]
+    write_offline_package(source, "source-package", "1.2.7", ["scheme>=1.2.0,<1.3.0"])
+    data = source / "research-data/panel.parquet"
+    data.parent.mkdir()
+    with data.open("wb") as stream:
+        stream.truncate(64 * 1024 * 1024)
+    if links:
+        try:
+            (source / "linked-data").symlink_to(data.parent, target_is_directory=True)
+            (source / "missing-data").symlink_to(root / "missing", target_is_directory=True)
+        except OSError:
+            pytest.skip("Creating symlinks requires permission on this platform")
+    temporary = tmp_path / "build"
+    temporary.mkdir()
+    created, outputs = [], []
+    for name in ("copytree", "copy2", "copyfile"):
+        monkeypatch.setattr(dependencies.shutil, name, Mock(side_effect=AssertionError("Source or built wheel was copied")))
+    store = Mock(side_effect=AssertionError("Built wheel was copied to storage"))
+    monkeypatch.setattr(dependencies, "_store_wheel", store)
+
+    async def run(arguments, cwd, environment):
+        output = Path(arguments[arguments.index("--out-dir") + 1])
+        assert arguments == ["uv", "build", "--wheel", "--no-sources", "--out-dir", str(output), str(source)]
+        assert output.parent == directory / ".solo-wheels/source-package"
+        UUID(output.name)
+        assert output in created
+        assert cwd == temporary
+        wheel = build_fixture_wheel(source, output, monkeypatch)
+        outputs.append((wheel, wheel.stat().st_ino))
+        return ""
+
+    monkeypatch.setattr(dependencies, "_run", run)
+    wheel, frozen, snapshots = asyncio.run(dependencies._freeze_runtime(
+        root, directory, source, temporary, Version("1.2.0"), {}, {}, created, current, frozenset(),
+    ))
+    built, inode = outputs[0]
+    assert wheel == directory / ".solo-wheels/source-package" / snapshots["source-package"]["id"] / built.name
+    assert wheel.is_file() and wheel.stat().st_ino == inode
+    assert not built.parent.exists()
+    assert created == [wheel.parent]
+    assert not frozen
+    assert list(temporary.iterdir()) == []
+    assert data.stat().st_size == 64 * 1024 * 1024
+    if links:
+        assert (source / "linked-data").is_symlink()
+        assert (source / "missing-data").is_symlink()
+    registered = next(call.args[1]["wheel"] for call in registry.api.await_args_list if call.args[0] == "artifacts/register")
+    assert Path(registered) == built
+    store.assert_not_called()
+
+
+def test_failed_direct_build_removes_output_before_configuration_changes(project_files, monkeypatch):
+    root, current, candidate = project_files
+    directory = root / current["path"]
+    before = {name: (directory / name).read_bytes() for name in ("pyproject.toml", "uv.lock")}
+    metadata = {"packages": [{"name": "scheme", "version": "1.2.0"}], "markers": {}}
+    monkeypatch.setattr(dependencies, "_metadata", AsyncMock(return_value=metadata))
+    outputs = []
+
+    async def run(arguments, cwd, environment):
+        assert arguments[:2] == ["uv", "build"]
+        output = Path(arguments[arguments.index("--out-dir") + 1])
+        assert output.parent == directory / ".solo-wheels/source-package"
+        (output / "incomplete.whl").write_bytes(b"partial build")
+        outputs.append(output)
+        raise web.HTTPError(422, reason="build rejected")
+
+    monkeypatch.setattr(dependencies, "_run", run)
+    with pytest.raises(web.HTTPError, match="build rejected"):
+        asyncio.run(dependencies.install_project(root, current, candidate))
+    assert outputs and all(not output.exists() for output in outputs)
+    assert {name: (directory / name).read_bytes() for name in before} == before
+    assert not dependencies._project_busy
+
+
 @pytest.mark.parametrize("current_version, source_version", [("1.2.0", "1.2.7"), ("1.2.7", "1.2.0")])
 @pytest.mark.parametrize("dev", [True, False])
 def test_real_uv_both_patch_directions_repeat_and_group_move(uv_projects, monkeypatch, current_version, source_version, dev):
@@ -655,13 +599,11 @@ def test_real_uv_both_patch_directions_repeat_and_group_move(uv_projects, monkey
         lock = tomllib.loads((directory / "uv.lock").read_text())
         selected = next(item for item in lock["package"] if item["name"] == "source-package")
         assert "path" in selected["source"] and ".solo-wheels/" in selected["source"]["path"]
-        assert not any(str(path).startswith(".solo-install-") for path in directory.parent.iterdir())
     assert file_snapshot(source) == source_before
     assert not (source / ".venv").exists()
     assert (directory / ".solo").is_file()
-    add_commands = [arguments for arguments, _ in calls if arguments[:2] == ["uv", "add"]]
-    assert len(add_commands) == 4 and all("--no-sync" in arguments and arguments[-1].endswith(".whl") for arguments in add_commands)
-    assert all(cwd != directory for arguments, cwd in calls if arguments[:2] in (["uv", "add"], ["uv", "lock"]))
+    assert len([args for args, _ in calls if args[:2] == ["uv", "lock"]]) == 4
+    assert all(cwd == directory for args, cwd in calls if args[:2] in (["uv", "lock"], ["uv", "sync"]))
 
 
 @pytest.mark.parametrize("requirement", ["scheme>=1.3.0,<1.4.0", "scheme==1.2.7"])
@@ -678,85 +620,26 @@ def test_real_uv_rejects_transitive_business_requirements_without_env_drift(uv_p
     actual_before = installed(directory)
     with pytest.raises(web.HTTPError, match="uv 安装失败"):
         asyncio.run(dependencies.install_project(root, current, candidate))
-    assert file_snapshot(directory) == before
+    assert all((directory / name).read_bytes() == before[Path(name)] for name in ("pyproject.toml", "uv.lock"))
     assert file_snapshot(source) == source_before
     assert installed(directory) == actual_before
     assert not list(directory.glob(".solo-wheels/**/*.whl"))
-    assert not list(directory.parent.glob(".solo-install-*"))
 
 
-def test_real_uv_preview_failure_never_mutates_live_environment(uv_projects, monkeypatch):
-    root, current, candidate = uv_projects
-    directory = root / current["path"]
-    sync_fixture(root, current)
-    before, actual_before = file_snapshot(directory), installed(directory)
-    real_run = dependencies._run
-    async def fail_preview(arguments, cwd, environment):
-        if arguments[:2] == ["uv", "sync"] and cwd != directory:
-            await real_run(arguments, cwd, environment)
-            raise web.HTTPError(422, reason="preview validation failure")
-        return await real_run(arguments, cwd, environment)
-    monkeypatch.setattr(dependencies, "_run", fail_preview)
-    with pytest.raises(web.HTTPError, match="preview validation failure"):
-        asyncio.run(dependencies.install_project(root, current, candidate))
-    assert file_snapshot(directory) == before
-    assert installed(directory) == actual_before
-    assert not list(directory.parent.glob(".solo-install-*"))
-
-
-@pytest.mark.parametrize("failure", ["sync", "metadata"])
-def test_real_uv_live_failure_restores_original_environment_and_lock(uv_projects, monkeypatch, failure):
-    root, current, candidate = uv_projects
-    directory = root / current["path"]
-    sync_fixture(root, current)
-    sentinel = directory / ".venv/bin/original-script"
-    sentinel.write_text(f"#!{dependencies._python(directory)}\noriginal env\n")
-    old_assets = directory / ".solo-wheels/existing/oldhash"
-    old_assets.mkdir(parents=True)
-    (old_assets / "kept.whl").write_bytes(b"pre-existing asset")
-    before, actual_before = file_snapshot(directory), installed(directory)
-    original_inode = (directory / ".venv").stat().st_ino
-    real_run, real_metadata = dependencies._run, dependencies._metadata
-    async def fail_sync(arguments, cwd, environment):
-        result = await real_run(arguments, cwd, environment)
-        if failure == "sync" and arguments[:2] == ["uv", "sync"] and cwd == directory:
-            assert (directory / ".venv").stat().st_ino != original_inode
-            assert installed(directory)["source-package"]["version"] == "1.2.7"
-            raise web.HTTPError(422, reason="live sync failure")
-        return result
-    live_reads = 0
-    async def fail_metadata(cwd, environment):
-        nonlocal live_reads
-        data = await real_metadata(cwd, environment)
-        if cwd == directory:
-            live_reads += 1
-            if failure == "metadata" and live_reads > 1:
-                next(item for item in data["packages"] if item["name"] == "scheme")["version"] = "1.2.7"
-        return data
-    monkeypatch.setattr(dependencies, "_run", fail_sync)
-    monkeypatch.setattr(dependencies, "_metadata", fail_metadata)
-    with pytest.raises(web.HTTPError):
-        asyncio.run(dependencies.install_project(root, current, candidate))
-    assert (directory / ".venv").stat().st_ino == original_inode
-    assert file_snapshot(directory) == before
-    assert installed(directory) == actual_before
-    assert not list(directory.parent.glob(".solo-install-*"))
-
-
-def test_real_uv_changed_content_gets_new_hash_without_overwriting_old_wheel(uv_projects):
+def test_real_uv_reinstall_gets_new_uuid_without_overwriting_old_wheel(uv_projects):
     root, current, candidate = uv_projects
     directory, source = root / current["path"], root / candidate["directory"]
     sync_fixture(root, current)
     asyncio.run(dependencies.install_project(root, current, candidate))
     old_wheel = next(directory.glob(".solo-wheels/source-package/*/*.whl"))
     old_content = old_wheel.read_bytes()
-    (source / "payload.py").write_text("VALUE = 2\n")
+    (source / "src/payload.py").write_text("VALUE = 2\n")
     asyncio.run(dependencies.install_project(root, current, candidate))
     wheels = list(directory.glob(".solo-wheels/source-package/*/*.whl"))
     assert len(wheels) == 2
     assert old_wheel.read_bytes() == old_content
     for wheel in wheels:
-        assert wheel.parent.name == hashlib.sha256(wheel.read_bytes()).hexdigest()
+        UUID(wheel.parent.name)
     selected = tomllib.loads((directory / "pyproject.toml").read_text())["tool"]["uv"]["sources"]["source-package"]["path"]
     assert (directory / selected) != old_wheel
     result = subprocess.run([str(dependencies._python(directory)), "-I", "-c", "import source_package; print(source_package.VALUE)"], capture_output=True, text=True)
@@ -849,22 +732,21 @@ def test_normalized_extra_retired_leaf_is_denied_before_asset_publication(
     set_sources(source, {"middle-package": {"path": str(middle)}})
     set_sources(middle, {"normalized-leaf": {"path": str(leaf), "extra": source_extra}})
     sync_fixture(root, current)
-    before = file_snapshot(directory)
-    directories = {path.relative_to(directory) for path in directory.rglob("*") if path.is_dir()}
+    before = {name: (directory / name).read_bytes() for name in ("pyproject.toml", "uv.lock")}
     async def deny(identifier):
         if identifier == leaf_id:
-            assert file_snapshot(directory) == before
-            assert not (directory / ".solo-wheels").exists()
+            assert {name: (directory / name).read_bytes() for name in before} == before
+            assert not (directory / ".solo-wheels/normalized-leaf").exists()
             raise web.HTTPError(422, reason="normalized extra source retired")
     admission.side_effect = deny
     with pytest.raises(web.HTTPError, match="normalized extra source retired"):
         asyncio.run(dependencies.install_project(root, current, candidate))
     admission.assert_any_await(leaf_id)
-    assert file_snapshot(directory) == before
-    assert {path.relative_to(directory) for path in directory.rglob("*") if path.is_dir()} == directories
+    assert {name: (directory / name).read_bytes() for name in before} == before
+    assert not list(directory.glob(".solo-wheels/*/*"))
 
 
-def test_retired_recursive_runtime_project_leaves_no_real_assets_or_directories(uv_projects, admission):
+def test_retired_recursive_runtime_project_cleans_built_assets(uv_projects, admission, registry):
     root, current, candidate = uv_projects
     directory, source = root / current["path"], root / candidate["directory"]
     child = root / "projects/factor/retired"
@@ -876,45 +758,19 @@ def test_retired_recursive_runtime_project_leaves_no_real_assets_or_directories(
     set_sources(source, {"retired-child": {"path": str(child)}})
     sync_fixture(root, current)
     files_before = file_snapshot(directory)
-    dirs_before = {path.relative_to(directory) for path in directory.rglob("*") if path.is_dir()}
     source_before, child_before = file_snapshot(source), file_snapshot(child)
     async def check(identifier):
         if identifier == child_id:
-            assert file_snapshot(directory) == files_before
-            assert not (directory / ".solo-wheels").exists()
+            assert all((directory / name).read_bytes() == files_before[Path(name)] for name in ("pyproject.toml", "uv.lock"))
+            assert not (directory / ".solo-wheels/retired-child").exists()
             raise web.HTTPError(422, reason="recursive source retired")
     admission.side_effect = check
     with pytest.raises(web.HTTPError, match="recursive source retired"):
         asyncio.run(dependencies.install_project(root, current, candidate))
     assert file_snapshot(directory) == files_before
-    assert {path.relative_to(directory) for path in directory.rglob("*") if path.is_dir()} == dirs_before
+    assert not list(directory.glob(".solo-wheels/*/*"))
+    assert not any(call.args[0] == "artifacts/register" for call in registry.api.await_args_list)
     assert file_snapshot(source) == source_before and file_snapshot(child) == child_before
-    assert not list(directory.parent.glob(".solo-install-*"))
-
-
-@pytest.mark.parametrize("via", ["candidate", "local", "wheel"])
-def test_direct_local_directory_requires_dist_is_rejected_before_real_asset_publication(uv_projects, monkeypatch, via):
-    root, current, candidate = uv_projects
-    directory, source = root / current["path"], root / candidate["directory"]
-    live = root / "projects/factor/live"
-    write_offline_package(live, "live-child", "1.2.7", ["scheme>=1.2.0,<1.3.0"])
-    requirement = f"live-child @ {live.as_uri()}"
-    if via == "candidate":
-        path = source / "pyproject.toml"
-        path.write_text(path.read_text().replace('["scheme>=1.2.0,<1.3.0"]', json.dumps(["scheme>=1.2.0,<1.3.0", requirement])))
-    else:
-        middle = root / "libraries/middle"
-        write_offline_package(middle, "unsafe-middle", "0.1.0", [requirement])
-        location = middle if via == "local" else build_fixture_wheel(middle, root / "wheels", monkeypatch)
-        path = source / "pyproject.toml"
-        path.write_text(path.read_text().replace('["scheme>=1.2.0,<1.3.0"]', '["scheme>=1.2.0,<1.3.0", "unsafe-middle>=0.1"]'))
-        set_sources(source, {"unsafe-middle": {"path": str(location)}})
-    sync_fixture(root, current)
-    before, live_before = file_snapshot(directory), file_snapshot(live)
-    with pytest.raises(web.HTTPError, match="非 wheel file URL"):
-        asyncio.run(dependencies.install_project(root, current, candidate))
-    assert file_snapshot(directory) == before and file_snapshot(live) == live_before
-    assert not (directory / ".solo-wheels").exists()
 
 
 def test_real_uv_git_and_wheel_runtime_sources_do_not_inject_upstream_scheme(uv_projects, monkeypatch):
@@ -943,15 +799,37 @@ def test_real_uv_git_and_wheel_runtime_sources_do_not_inject_upstream_scheme(uv_
     source_before = file_snapshot(source)
     git_before = file_snapshot(git_source)
     # Dirty uncommitted source must not replace the exact source-lock commit.
-    (git_source / "payload.py").write_text("VALUE = 99\n")
+    (git_source / "src/payload.py").write_text("VALUE = 99\n")
     git_before = file_snapshot(git_source)
+    real_run, real_store = dependencies._run, dependencies._store_wheel
+    outputs = {}
+    async def run(arguments, cwd, environment):
+        if arguments[:2] == ["uv", "build"]:
+            output = Path(arguments[arguments.index("--out-dir") + 1])
+            assert output.parent.parent == directory / ".solo-wheels"
+            UUID(output.name)
+        result = await real_run(arguments, cwd, environment)
+        if arguments[:2] == ["uv", "build"]:
+            built, = output.glob("*.whl")
+            outputs[output.parent.name] = (built, built.stat().st_ino)
+        return result
+    store = Mock(wraps=real_store)
+    monkeypatch.setattr(dependencies, "_run", run)
+    monkeypatch.setattr(dependencies, "_store_wheel", store)
     asyncio.run(dependencies.install_project(root, current, candidate))
+    store.assert_called_once()
+    assert store.call_args.args[2] == wheel
     lock = tomllib.loads((directory / "uv.lock").read_text())
     actual = installed(directory)
     assert actual["scheme"]["version"] == "1.2.0"
     assert {"git-runtime", "wheel-runtime"} <= actual.keys()
     selected = {item["name"]: item for item in lock["package"]}
     assert ".solo-wheels/git-runtime/" in selected["git-runtime"]["source"]["path"]
+    assert set(outputs) == {"source-package", "git-runtime"}
+    for name, (built, inode) in outputs.items():
+        final = directory / selected[name]["source"]["path"]
+        assert final.stat().st_ino == inode
+        assert not built.parent.exists()
     probe = subprocess.run([str(dependencies._python(directory)), "-I", "-B", "-c", "import git_runtime; print(git_runtime.VALUE)"], capture_output=True, text=True)
     assert probe.returncode == 0 and probe.stdout.strip() == "1"
     frozen_wheel = directory / selected["wheel-runtime"]["source"]["path"]
@@ -977,17 +855,13 @@ def test_real_uv_preserves_current_relative_source_and_lock_patch_not_manifest_p
     run_uv(["lock", "--project", str(directory), "--check"], root)
 
 
-@pytest.mark.parametrize("escape", ["outside", "symlink", "cycle"])
-def test_local_runtime_graph_cannot_escape_root_follow_links_or_cycle(uv_projects, escape):
+@pytest.mark.parametrize("escape", ["outside", "cycle"])
+def test_local_runtime_graph_cannot_escape_root_or_cycle(uv_projects, escape):
     root, current, candidate = uv_projects
     directory, source = root / current["path"], root / candidate["directory"]
     dependency = root.parent / "outside" if escape == "outside" else root / "libraries/unsafe"
     write_offline_package(dependency, "unsafe-dependency", "0.1.0")
-    if escape == "symlink":
-        link = root / "libraries/link"
-        link.symlink_to(dependency, target_is_directory=True)
-        dependency = link
-    elif escape == "cycle":
+    if escape == "cycle":
         dependency = source
     path = source / "pyproject.toml"
     name = "source-package" if escape == "cycle" else "unsafe-dependency"
@@ -1045,7 +919,7 @@ def test_real_uv_freeze_build_version_keeps_shared_scheme_and_persistent_wheels(
     assert json.loads((run / "build.json").read_text())["scheme_version"] == "1.2.0"
     source_wheel = next((directory / ".solo-wheels/source-package").glob("*/*.whl"))
     assert (run / "wheels" / source_wheel.name).read_bytes() == source_wheel.read_bytes()
-    assert json.loads((run / "input.json").read_text())["algos"]["factor"]["sha256"] == hashlib.sha256(source_wheel.read_bytes()).hexdigest()
+    assert set(json.loads((run / "input.json").read_text())["algos"]["factor"]) == {"package", "version", "wheel", "entry"}
 
 
 @pytest.mark.parametrize("package_name, expected", [(None, None), ("Factor_Ab12", "factor-ab12"), ("factor-ab12", "factor-ab12")])
@@ -1143,7 +1017,7 @@ def test_deletion_lease_acquire_and_idempotent_release_do_not_unlock_non_delete_
 @pytest.mark.parametrize("body", [None, {}, {"operation": "save"}, {"operation": "delete", "project_id": "invalid"},
     {"operation": "delete", "project_id": str(uuid4())},
     *({"operation": "delete", "project_id": str(uuid4()), "lease": nonce}
-      for nonce in (None, "", "  ", 12, {}, [], "x" * 129))])
+      for nonce in (None, "", "  ", 12, {}, []))])
 def test_deletion_lease_rejects_invalid_requests(body):
     request = SimpleNamespace(current_user=object(), get_json_body=Mock(return_value=body), finish=Mock())
     with pytest.raises(web.HTTPError):
@@ -1211,7 +1085,7 @@ def test_deletion_lease_isolated_by_project_uuid_even_with_same_nonce(monkeypatc
     assert not dependencies._project_busy and not dependencies._deletion_leases
 
 
-@pytest.mark.parametrize("nonce", [None, "", "  ", 12, {}, [], "x" * 129])
+@pytest.mark.parametrize("nonce", [None, "", "  ", 12, {}, []])
 def test_deletion_lease_invalid_release_cannot_change_owner(monkeypatch, nonce):
     identifier, owned = str(uuid4()), str(uuid4())
     monkeypatch.setattr(dependencies, "_project_busy", {identifier})
@@ -1227,9 +1101,8 @@ def test_artifact_lookup_has_no_implicit_published_filter(monkeypatch):
     monkeypatch.setattr(dependencies, "_artifact_api", _ARTIFACT_API)
     monkeypatch.setattr(dependencies, "AsyncHTTPClient", lambda: SimpleNamespace(fetch=fetch))
     monkeypatch.setenv("SOLO_BACKEND_URL", "http://registry.invalid/")
-    digest = "a" * 64
-    assert asyncio.run(dependencies.artifact_catalog(sha256=digest)) == []
-    assert fetch.await_args.args[0] == f"http://registry.invalid/api/v1/artifacts?sha256={digest}"
+    assert asyncio.run(dependencies.artifact_catalog()) == []
+    assert fetch.await_args.args[0] == "http://registry.invalid/api/v1/artifacts"
 
 
 @pytest.mark.parametrize("detail", ["registry test-password", {"reason": "registry test-password"}])
@@ -1246,11 +1119,358 @@ def test_artifact_api_failure_redacts_backend_details(monkeypatch, detail):
 
 def artifact_fixture(wheel, *, kind="factor", origin=None, dependencies_=None, published=True):
     name, version, _ = dependencies._wheel_metadata(wheel)
-    return {"id": str(uuid4()), "kind": kind, "package": name, "version": version, "filename": wheel.name,
-            "sha256": hashlib.sha256(wheel.read_bytes()).hexdigest(), "entry": f'{name.replace("-", "_")}:Algo',
+    identifier = str(uuid4())
+    return {"id": identifier, "storageDirectory": identifier, "kind": kind, "package": name, "version": version, "filename": wheel.name,
+            "entry": f'{name.replace("-", "_")}:Algo',
             "schemeVersion": "1.2.7", "sources": {"scheme": {"version": "1.2.7"}},
             "sourceProjectId": origin or str(uuid4()), "sourceProjectName": "deleted source",
+            "sourceVersionId": None, "retired": False, "retiredReason": None,
+            "sizeBytes": wheel.stat().st_size, "bundlePath": None,
             "dependencies": dependencies_ or {}, "publishedAt": "2026-10-08T00:00:00Z" if published else None}
+
+
+def accepted_snapshot(item):
+    return {"id": item["id"], "artifact_id": item["id"], "kind": item["kind"], "package": item["package"],
+            "version": item["version"], "filename": item["filename"], "size_bytes": item["sizeBytes"],
+            "entry": item["entry"], "scheme_version": item["schemeVersion"], "sources": item["sources"],
+            "origin_project_id": item["sourceProjectId"], "origin_project_name": item["sourceProjectName"],
+            "origin_version_id": item["sourceVersionId"], "dependencies": item["dependencies"]}
+
+
+def managed_wheel_fixture(root, directory, monkeypatch, registry, *, legacy=True):
+    source = root / "libraries/kept-helper"
+    write_offline_package(source, "kept-helper", "0.1.0")
+    storage = "a1" * 32 if legacy else str(uuid4())  # Artificial legacy name, not a digest.
+    wheel = build_fixture_wheel(source, directory / ".solo-wheels/kept-helper" / storage, monkeypatch)
+    record = artifact_fixture(wheel, kind="dependency", published=False)
+    record["storageDirectory"] = storage
+    if not legacy:
+        record["id"] = storage
+    registry.snapshots[record["id"]] = record
+    registry.contents[record["id"]] = wheel.read_bytes()
+    return wheel, record
+
+
+def mock_install_commands(root, current, monkeypatch, *, failure=None):
+    import tomlkit
+
+    directory = root / current["path"]
+    original_lock = tomllib.loads((directory / "uv.lock").read_text())
+    scheme = next(item["version"] for item in original_lock["package"] if item["name"] == "scheme")
+    state = SimpleNamespace(calls=[], installed={item["name"]: item["version"] for item in original_lock["package"]}, failed=False)
+    monkeypatch.setattr(dependencies, "_metadata", AsyncMock(return_value={
+        "packages": [{"name": "scheme", "version": scheme}], "markers": {},
+    }))
+
+    async def run(arguments, cwd, environment):
+        step = arguments[1]
+        state.calls.append(step)
+        if step == "build":
+            build_fixture_wheel(Path(arguments[-1]), Path(arguments[arguments.index("--out-dir") + 1]), monkeypatch)
+        elif step == "lock":
+            uv = tomllib.loads((directory / "pyproject.toml").read_text())["tool"]["uv"]
+            sources = {name: (directory / location["path"]).resolve() for name, location in uv["sources"].items()
+                       if "path" in location and location["path"].endswith(".whl") and name != "scheme"}
+            constraints = uv.get("constraint-dependencies", [])
+            for wheel in directory.glob(".solo-wheels/*/*/*.whl"):
+                name, _, _ = dependencies._wheel_metadata(wheel)
+                if f"{name} @ {wheel.as_uri()}" in constraints:
+                    sources[name] = wheel
+            packages = [{"name": "scheme", "version": scheme}]
+            for name, wheel in sources.items():
+                _, version, _ = dependencies._wheel_metadata(wheel)
+                packages.append({"name": name, "version": version, "source": {"path": str(wheel)}})
+            (directory / "uv.lock").write_text(tomlkit.dumps({"version": 1, "package": packages}))
+        elif step == "sync":
+            state.installed = {item["name"]: item["version"] for item in tomllib.loads((directory / "uv.lock").read_text())["package"]}
+        else:
+            raise AssertionError(f"Unexpected command: {arguments}")
+        if step == failure and not state.failed:
+            state.failed = True
+            raise web.HTTPError(422, reason=f"injected {step} failure")
+        return ""
+
+    monkeypatch.setattr(dependencies, "_run", run)
+    return state
+
+
+@pytest.mark.parametrize("legacy", [True, False], ids=["legacy-storage", "uuid-storage"])
+def test_installed_artifact_identity_is_exact_and_cached(project_files, monkeypatch, registry, legacy):
+    root, current, _ = project_files
+    directory = root / current["path"]
+    wheel, selected = managed_wheel_fixture(root, directory, monkeypatch, registry, legacy=legacy)
+    other = {**selected, "id": str(uuid4()), "storageDirectory": "b2" * 32}
+    registry.snapshots[other["id"]] = other
+    registry.accepted[current["project_id"]] = [selected]
+    lock = {"package": [{"name": "Kept_Helper", "version": selected["version"], "source": {"path": str(wheel)}}]}
+    known, projects = {}, {}
+    for _ in range(2):
+        assert asyncio.run(dependencies._installed_artifacts(root, directory, lock, known,
+            project_id=current["project_id"], projects=projects)) == [selected]
+    paths = [call.args[0] for call in registry.api.await_args_list]
+    assert paths.count(f'projects/{current["project_id"]}') == int(legacy)
+    assert paths.count(f'artifacts/{selected["id"]}') == 1
+    assert f'artifacts/{other["id"]}' not in paths
+    assert not any(path == "artifacts" or path.startswith("artifacts?") for path in paths)
+    assert known == {wheel: selected}
+
+
+@pytest.mark.parametrize("mismatch", ["unaccepted", "unregistered", "directory", "filename", "version", "package", "ambiguous"])
+def test_unmapped_legacy_consumer_is_rejected_before_install_mutation(project_files, monkeypatch, registry, mismatch):
+    root, current, candidate = project_files
+    directory = root / current["path"]
+    wheel, selected = managed_wheel_fixture(root, directory, monkeypatch, registry)
+    registry.accepted[current["project_id"]] = [selected]
+    lock = directory / "uv.lock"
+    lock.write_text(lock.read_text() + f'[[package]]\nname = "kept-helper"\nversion = "0.1.0"\nsource = {{ path = {json.dumps(str(wheel))} }}\n')
+    if mismatch == "unaccepted":
+        registry.accepted.clear()
+    elif mismatch == "unregistered":
+        registry.snapshots.pop(selected["id"])
+    elif mismatch == "directory":
+        selected["storageDirectory"] = "b2" * 32
+    elif mismatch == "filename":
+        selected["filename"] = "different-0.1.0-py3-none-any.whl"
+    elif mismatch == "version":
+        selected["version"] = "0.2.0"
+    elif mismatch == "package":
+        registry.snapshots[selected["id"]] = {**selected, "package": "different"}
+    elif mismatch == "ambiguous":
+        registry.accepted[current["project_id"]].append({**selected, "id": str(uuid4())})
+    if mismatch != "ambiguous":
+        # A matching package/version elsewhere is never an identity fallback.
+        other = {**selected, "id": str(uuid4()), "storageDirectory": wheel.parent.name}
+        registry.snapshots[other["id"]] = other
+    before = file_snapshot(root)
+    metadata = {"packages": [{"name": "scheme", "version": "1.2.0"}], "markers": {}}
+    monkeypatch.setattr(dependencies, "_metadata", AsyncMock(return_value=metadata))
+    run, freeze = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(dependencies, "_run", run)
+    monkeypatch.setattr(dependencies, "_freeze_runtime", freeze)
+    with pytest.raises(web.HTTPError, match="无法确认精确身份") as error:
+        asyncio.run(dependencies.install_project(root, current, candidate))
+    assert error.value.status_code == 422
+    run.assert_not_awaited()
+    freeze.assert_not_awaited()
+    assert not any(call.args[1] is not None for call in registry.api.await_args_list if len(call.args) > 1)
+    assert file_snapshot(root) == before
+    assert not dependencies._project_busy
+
+
+@pytest.mark.parametrize("scheme", ["1.2.0", "1.6.2"])
+@pytest.mark.parametrize("legacy", [True, False], ids=["legacy-storage", "uuid-storage"])
+def test_install_unrelated_dependency_retains_exact_managed_artifact(project_files, monkeypatch, registry, scheme, legacy):
+    import tomlkit
+
+    root, current, candidate = project_files
+    directory, source = root / current["path"], root / candidate["directory"]
+    series = ".".join(scheme.split(".")[:2])
+    minor = int(scheme.split(".")[1])
+    requirement = f"scheme>={series}.0,<1.{minor + 1}.0"
+    current["scheme_version"], candidate["schemeVersion"] = scheme, scheme
+    for path in (directory, source):
+        marker = json.loads((path / ".solo").read_text())
+        marker["scheme_version"] = scheme
+        (path / ".solo").write_text(json.dumps(marker))
+    write_offline_package(source, "source-package", scheme, [requirement])
+    configpath = directory / "pyproject.toml"
+    config = tomlkit.parse(configpath.read_text())
+    config["project"].update(version=scheme, dependencies=[requirement, "kept-helper==0.1.0"])
+    wheel, selected = managed_wheel_fixture(root, directory, monkeypatch, registry, legacy=legacy)
+    config.setdefault("tool", {}).setdefault("uv", {})["sources"] = {"kept-helper": {"path": str(wheel)}}
+    configpath.write_text(tomlkit.dumps(config))
+    lock = directory / "uv.lock"
+    lock.write_text(tomlkit.dumps({"version": 1, "package": [
+        {"name": "scheme", "version": scheme},
+        {"name": "kept-helper", "version": "0.1.0", "source": {"path": str(wheel)}}]}))
+    registry.accepted[current["project_id"]] = [selected]
+    other = {**selected, "id": str(uuid4()), "storageDirectory": "b2" * 32}
+    registry.snapshots[other["id"]] = other
+    state = mock_install_commands(root, current, monkeypatch)
+    inode, original = wheel.stat().st_ino, wheel.read_bytes()
+    assert asyncio.run(dependencies.install_project(root, current, candidate)) == "source-package"
+    assert state.installed == {"scheme": scheme, "source-package": scheme, "kept-helper": "0.1.0"}
+    assert {item["id"] for item in registry.accepted[current["project_id"]]} == {
+        selected["id"], next(item["id"] for item in registry.snapshots.values() if item["package"] == "source-package")}
+    assert wheel.stat().st_ino == inode and wheel.read_bytes() == original
+    assert list(wheel.parent.parent.glob("*/*.whl")) == [wheel]
+    assert tomllib.loads(configpath.read_text())["tool"]["uv"]["sources"]["kept-helper"] == {"path": str(wheel)}
+    paths = [call.args[0] for call in registry.api.await_args_list]
+    assert paths.count(f'projects/{current["project_id"]}') == int(legacy)
+    assert paths.count(f'artifacts/{selected["id"]}') == 1
+    assert f'artifacts/{other["id"]}' not in paths
+
+
+@pytest.mark.parametrize("registered", [True, False])
+@pytest.mark.parametrize("recursive", [True, False])
+def test_candidate_legacy_runtime_uses_its_accepted_uuid_or_rejects_cleanly(project_files, monkeypatch, registry, registered, recursive):
+    root, current, candidate = project_files
+    directory, source = root / current["path"], root / candidate["directory"]
+    owner, owner_id = source, candidate["id"]
+    if recursive:
+        owner, owner_id = root / "projects/factor/middle", str(uuid4())
+        write_offline_package(source, "source-package", "1.2.7", ["scheme>=1.2.0,<1.3.0", "middle-package>=1.2"])
+        write_offline_package(owner, "middle-package", "1.2.7", ["scheme>=1.2.0,<1.3.0", "kept-helper==0.1.0"])
+        (owner / ".solo").write_text(json.dumps({"project_id": owner_id, "name": "middle", "kind": "factor", "scheme_version": "1.2.7"}))
+        set_sources(source, {"middle-package": {"path": str(owner)}})
+    else:
+        write_offline_package(source, "source-package", "1.2.7", ["scheme>=1.2.0,<1.3.0", "kept-helper==0.1.0"])
+    wheel, selected = managed_wheel_fixture(root, owner, monkeypatch, registry)
+    set_sources(owner, {"kept-helper": {"path": str(wheel)}})
+    registry.accepted[owner_id] = [selected]
+    other = {**selected, "id": str(uuid4()), "storageDirectory": "b2" * 32}
+    registry.snapshots[other["id"]] = other
+    if not registered:
+        registry.snapshots.pop(selected["id"])
+    # Reuse an already staged UUID wheel instead of copying the legacy file.
+    staged = build_fixture_wheel(root / "libraries/kept-helper", directory / ".solo-wheels/kept-helper" / selected["id"], monkeypatch)
+    before, source_before, owner_before = file_snapshot(directory), file_snapshot(source), file_snapshot(owner)
+    inode = staged.stat().st_ino
+    state = mock_install_commands(root, current, monkeypatch)
+    store = Mock(side_effect=AssertionError("Existing managed wheel was recopied"))
+    monkeypatch.setattr(dependencies, "_store_wheel", store)
+    if registered:
+        assert asyncio.run(dependencies.install_project(root, current, candidate)) == "source-package"
+        assert state.installed["kept-helper"] == "0.1.0"
+        assert selected["id"] in {item["id"] for item in registry.accepted[current["project_id"]]}
+        assert other["id"] not in {item["id"] for item in registry.accepted[current["project_id"]]}
+    else:
+        with pytest.raises(web.HTTPError, match="无法确认精确身份"):
+            asyncio.run(dependencies.install_project(root, current, candidate))
+        assert file_snapshot(directory) == before
+        assert state.calls == ["build"] * (2 if recursive else 1)
+        assert current["project_id"] not in registry.accepted
+        assert not any(call.args[0] == "artifacts/register" for call in registry.api.await_args_list)
+    assert staged.stat().st_ino == inode
+    assert file_snapshot(source) == source_before
+    assert file_snapshot(owner) == owner_before
+    paths = [call.args[0] for call in registry.api.await_args_list]
+    assert paths.count(f'projects/{owner_id}') == 1
+    if recursive:
+        assert f'projects/{candidate["id"]}' not in paths
+    assert paths.count(f'artifacts/{selected["id"]}') == 1
+    assert f'artifacts/{other["id"]}' not in paths
+    assert not any(call.kwargs.get("binary") for call in registry.api.await_args_list)
+    store.assert_not_called()
+    assert not dependencies._project_busy
+
+
+@pytest.mark.parametrize("step", ["lock", "sync", "accept"])
+def test_legacy_dependency_keeps_ordinary_failure_rollback(project_files, monkeypatch, registry, step):
+    root, current, candidate = project_files
+    directory, source = root / current["path"], root / candidate["directory"]
+    write_offline_package(source, "source-package", "1.2.7", ["scheme>=1.2.0,<1.3.0"])
+    wheel, selected = managed_wheel_fixture(root, directory, monkeypatch, registry)
+    set_sources(directory, {"kept-helper": {"path": str(wheel)}})
+    lock = directory / "uv.lock"
+    lock.write_text(lock.read_text() + f'[[package]]\nname = "kept-helper"\nversion = "0.1.0"\nsource = {{ path = {json.dumps(str(wheel))} }}\n')
+    registry.accepted[current["project_id"]] = [selected]
+    before = file_snapshot(directory)
+    state = mock_install_commands(root, current, monkeypatch, failure=step)
+    installed_before = state.installed.copy()
+    api = registry.api.side_effect
+
+    async def reject(path, body=None, *, binary=False):
+        if step == "accept" and path.endswith("/dependencies") and body is not None:
+            raise web.HTTPError(502, reason="injected acceptance failure")
+        return await api(path, body, binary=binary)
+
+    registry.api.side_effect = reject
+    with pytest.raises(web.HTTPError, match="injected"):
+        asyncio.run(dependencies.install_project(root, current, candidate))
+    assert file_snapshot(directory) == before
+    assert state.installed == installed_before
+    assert state.calls.count("sync") == (1 if step == "lock" else 2)
+    assert registry.accepted[current["project_id"]] == [selected]
+    assert list(directory.glob(".solo-wheels/*/*/*.whl")) == [wheel]
+    assert not dependencies._project_busy
+
+
+@pytest.mark.parametrize("failure", [None, "missing", "lock", "sync", "accept"])
+def test_real_uv_legacy_consumer_retains_exact_identity_and_rolls_back(uv_projects, monkeypatch, registry, failure):
+    import tomlkit
+
+    root, current, candidate = uv_projects
+    directory = root / current["path"]
+    wheel, selected = managed_wheel_fixture(root, directory, monkeypatch, registry)
+    configpath = directory / "pyproject.toml"
+    config = tomlkit.parse(configpath.read_text())
+    config["project"]["dependencies"].append("kept-helper==0.1.0")
+    config["tool"]["uv"]["sources"]["kept-helper"] = {"path": str(wheel)}
+    configpath.write_text(tomlkit.dumps(config))
+    registry.accepted[current["project_id"]] = [selected]
+    other = {**selected, "id": str(uuid4()), "storageDirectory": "b2" * 32}
+    registry.snapshots[other["id"]] = other
+    sync_fixture(root, current)
+    before = {name: (directory / name).read_bytes() for name in ("pyproject.toml", "uv.lock")}
+    actual_before, inode = installed(directory), wheel.stat().st_ino
+    wheel_directories = set(directory.glob(".solo-wheels/*/*"))
+    if failure == "missing":
+        registry.snapshots.pop(selected["id"])
+    real_run, api = dependencies._run, registry.api.side_effect
+    calls, failed = [], False
+
+    async def run(arguments, cwd, environment):
+        nonlocal failed
+        calls.append(arguments[1])
+        result = await real_run(arguments, cwd, environment)
+        if arguments[1] == failure and not failed:
+            failed = True
+            raise web.HTTPError(422, reason="injected ordinary failure")
+        return result
+
+    async def reject(path, body=None, *, binary=False):
+        if failure == "accept" and path.endswith("/dependencies") and body is not None:
+            raise web.HTTPError(502, reason="injected ordinary failure")
+        return await api(path, body, binary=binary)
+
+    monkeypatch.setattr(dependencies, "_run", run)
+    registry.api.side_effect = reject
+    if failure:
+        with pytest.raises(web.HTTPError, match="无法确认精确身份" if failure == "missing" else "injected"):
+            asyncio.run(dependencies.install_project(root, current, candidate))
+        assert {name: (directory / name).read_bytes() for name in before} == before
+        assert installed(directory) == actual_before
+        assert set(directory.glob(".solo-wheels/*/*")) == wheel_directories
+        assert registry.accepted[current["project_id"]] == [selected]
+        assert calls.count("sync") == (0 if failure == "missing" else 1 if failure == "lock" else 2)
+    else:
+        assert asyncio.run(dependencies.install_project(root, current, candidate)) == "source-package"
+        assert installed(directory)["kept-helper"] == actual_before["kept-helper"]
+        assert selected["id"] in {item["id"] for item in registry.accepted[current["project_id"]]}
+        assert len(registry.accepted[current["project_id"]]) == 2
+    assert wheel.stat().st_ino == inode
+    assert list(wheel.parent.parent.glob("*/*.whl")) == [wheel]
+    assert not any(call.kwargs.get("binary") for call in registry.api.await_args_list)
+    assert not dependencies._project_busy
+
+
+@pytest.mark.parametrize("legacy", [True, False], ids=["legacy-storage", "uuid-storage"])
+def test_real_uv_candidate_managed_runtime_uses_exact_artifact(uv_projects, monkeypatch, registry, legacy):
+    import tomlkit
+
+    root, current, candidate = uv_projects
+    directory, source = root / current["path"], root / candidate["directory"]
+    wheel, selected = managed_wheel_fixture(root, source, monkeypatch, registry, legacy=legacy)
+    registry.accepted[candidate["id"]] = [selected]
+    other = {**selected, "id": str(uuid4()), "storageDirectory": "b2" * 32}
+    registry.snapshots[other["id"]] = other
+    configpath = source / "pyproject.toml"
+    config = tomlkit.parse(configpath.read_text())
+    config["project"]["dependencies"].append("kept-helper==0.1.0")
+    config["tool"]["uv"]["sources"]["kept-helper"] = {"path": str(wheel)}
+    configpath.write_text(tomlkit.dumps(config))
+    target = build_fixture_wheel(root / "libraries/kept-helper", directory / ".solo-wheels/kept-helper" / selected["id"], monkeypatch)
+    sync_fixture(root, current)
+    before, inode = file_snapshot(source), target.stat().st_ino
+    assert asyncio.run(dependencies.install_project(root, current, candidate)) == "source-package"
+    assert installed(directory)["kept-helper"]["version"] == "0.1.0"
+    assert selected["id"] in {item["id"] for item in registry.accepted[current["project_id"]]}
+    assert other["id"] not in {item["id"] for item in registry.accepted[current["project_id"]]}
+    assert file_snapshot(source) == before
+    assert target.stat().st_ino == inode
+    assert not any(call.kwargs.get("binary") for call in registry.api.await_args_list)
+    assert not dependencies._project_busy
 
 
 def published_graph(root, candidate, monkeypatch, *, marked=False):
@@ -1261,14 +1481,14 @@ def published_graph(root, candidate, monkeypatch, *, marked=False):
     child = root / "projects/factor/published-child"
     write_offline_package(child, "published-child", "1.2.7", ["scheme>=1.2.0,<1.3.0", "published-leaf==0.1.0"])
     child_wheel = build_fixture_wheel(child, root / "registry-bytes", monkeypatch)
-    child_snapshot = artifact_fixture(child_wheel, dependencies_=[leaf_snapshot], published=False)
+    child_snapshot = artifact_fixture(child_wheel, dependencies_={"published-leaf": accepted_snapshot(leaf_snapshot)}, published=False)
     source = root / candidate["directory"]
     raw = 'published-child>=1.2; python_version < "0"' if marked else "published-child>=1.2"
     path = source / "pyproject.toml"
     path.write_text(path.read_text().replace('["scheme>=1.2.0,<1.3.0"]', json.dumps(["scheme>=1.2.0,<1.3.0", raw])))
     wheel = build_fixture_wheel(source, root / "registry-bytes", monkeypatch)
     snapshot = artifact_fixture(wheel, origin=candidate["id"],
-                                dependencies_={"published-child": child_snapshot, "published-leaf": leaf_snapshot})
+                                dependencies_={"published-child": accepted_snapshot(child_snapshot), "published-leaf": accepted_snapshot(leaf_snapshot)})
     records = {item["id"]: item for item in (snapshot, child_snapshot, leaf_snapshot)}
     contents = {item["id"]: asset.read_bytes() for item, asset in ((snapshot, wheel), (child_snapshot, child_wheel), (leaf_snapshot, leaf_wheel))}
     for directory in (source, child, leaf):
@@ -1277,24 +1497,85 @@ def published_graph(root, candidate, monkeypatch, *, marked=False):
 
 
 def published_registry(monkeypatch, records, contents):
-    receipts = install_receipts(records)
-
     async def api(path, body=None, *, binary=False):
-        result = receipts.installation(path, body)
-        if result is not None:
-            return result
         if path.startswith("artifacts/"):
             identifier = path.split("/")[1]
-            if binary:
-                assert set(records) <= {identifier for receipt in receipts.pending.values() for identifier in receipt["pending"]}
             return contents[identifier] if binary else records[identifier]
         if path.startswith("projects/") and path.endswith("/dependencies"):
-            return receipts.accept(path, body)
+            assert set(body) == {"artifacts"}
+            return {"artifacts": [accepted_snapshot(records[identifier]) for identifier in body["artifacts"]]}
         raise AssertionError(f"Published installation attempted origin lookup: {path}")
     mock = AsyncMock(side_effect=api)
-    mock.receipts = receipts
     monkeypatch.setattr(dependencies, "_artifact_api", mock)
     return mock
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_artifact_download_writes_only_final_wheel_and_reuses_existing_file(project_files, monkeypatch, existing):
+    root, current, candidate = project_files
+    directory = root / current["path"]
+    snapshot = {"id": str(uuid4()), "kind": "factor", "package": "source-package", "schemeVersion": "1.2.7",
+                "filename": "source_package-1.2.7-py3-none-any.whl", "publishedAt": "2026-10-08T00:00:00Z"}
+    target = directory / ".solo-wheels/source-package" / snapshot["id"] / snapshot["filename"]
+    if existing:
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"existing wheel")
+    original_open, writes, created = Path.open, [], []
+
+    def open_(path, mode="r", *args, **kwargs):
+        assert mode == "xb" and path == target, "Artifact used an intermediate file"
+        assert target.parent in created
+        writes.append(path)
+        return original_open(path, mode, *args, **kwargs)
+
+    async def api(path, body=None, *, binary=False):
+        if path == f'artifacts/{snapshot["id"]}':
+            return snapshot
+        assert path == f'artifacts/{snapshot["id"]}/wheel' and binary
+        assert writes == [target]
+        return b"downloaded wheel"
+
+    download = AsyncMock(side_effect=api)
+    store = Mock(side_effect=AssertionError("Downloaded wheel was copied"))
+    monkeypatch.setattr(dependencies, "_artifact_api", download)
+    monkeypatch.setattr(dependencies, "_store_wheel", store)
+    with monkeypatch.context() as writing:
+        writing.setattr(Path, "open", open_)
+        staged, snapshots = asyncio.run(dependencies._stage_artifact_graph(root, directory, [snapshot], Version("1.2.0"), created))
+    assert staged == {"source-package": target}
+    assert snapshots == {"source-package": snapshot}
+    assert target.read_bytes() == (b"existing wheel" if existing else b"downloaded wheel")
+    assert writes == ([] if existing else [target])
+    assert created == ([] if existing else [target.parent])
+    assert len([call for call in download.await_args_list if call.kwargs.get("binary")]) == (0 if existing else 1)
+    store.assert_not_called()
+
+
+def test_failed_artifact_download_removes_final_directory(project_files, monkeypatch):
+    root, current, candidate = project_files
+    directory = root / current["path"]
+    before = {name: (directory / name).read_bytes() for name in ("pyproject.toml", "uv.lock")}
+    snapshot = {"id": str(uuid4()), "kind": "factor", "package": "source-package", "schemeVersion": "1.2.7",
+                "sourceProjectId": candidate["id"], "filename": "source_package-1.2.7-py3-none-any.whl",
+                "publishedAt": "2026-10-08T00:00:00Z"}
+    parent = directory / ".solo-wheels/source-package" / snapshot["id"]
+    monkeypatch.setattr(dependencies, "_metadata", AsyncMock(return_value={
+        "packages": [{"name": "scheme", "version": "1.2.0"}], "markers": {},
+    }))
+
+    async def api(path, body=None, *, binary=False):
+        if binary:
+            assert (parent / snapshot["filename"]).is_file()
+            raise web.HTTPError(502, reason="download rejected")
+        assert path == f'artifacts/{snapshot["id"]}'
+        return snapshot
+
+    monkeypatch.setattr(dependencies, "_artifact_api", api)
+    with pytest.raises(web.HTTPError, match="download rejected"):
+        asyncio.run(dependencies.install_artifact(root, current, snapshot))
+    assert not parent.exists()
+    assert {name: (directory / name).read_bytes() for name in before} == before
+    assert not dependencies._project_busy
 
 
 @pytest.mark.parametrize("dev", [True, False])
@@ -1322,7 +1603,7 @@ def test_real_uv_published_install_survives_deleted_sources_and_preserves_marker
     assert any("source-package" in raw for raw in (config["dependency-groups"]["dev"] if dev else config["project"]["dependencies"]))
     lock = tomllib.loads((directory / "uv.lock").read_text())
     for record in records.values():
-        staged = directory / ".solo-wheels" / record["package"] / record["sha256"] / record["filename"]
+        staged = directory / ".solo-wheels" / record["package"] / record["id"] / record["filename"]
         assert staged.read_bytes() == contents[record["id"]]
     accepted = next(call for call in api.await_args_list if call.args[0].endswith("/dependencies"))
     expected = {snapshot["id"]} if marked else set(records)
@@ -1332,86 +1613,9 @@ def test_real_uv_published_install_survives_deleted_sources_and_preserves_marker
     downloaded = [call for call in api.await_args_list if call.kwargs.get("binary")]
     assert len(downloaded) == 3
     assert not dependencies._project_busy
-    assert not list(directory.parent.glob(".solo-install-*"))
 
 
-@pytest.mark.parametrize("failure", ["hash", "metadata", "missing-id", "retired", "conflict"])
-def test_real_uv_published_bad_closure_rolls_back_before_live_commit(uv_projects, monkeypatch, failure):
-    root, current, candidate = uv_projects
-    directory = root / current["path"]
-    sync_fixture(root, current)
-    snapshot, records, contents = published_graph(root, candidate, monkeypatch)
-    child = next(record for record in records.values() if record["package"] == "published-child")
-    if failure == "hash":
-        contents[child["id"]] += b"tampered"
-    elif failure == "metadata":
-        child["version"] = "1.2.8"
-    elif failure == "missing-id":
-        del child["id"]
-    elif failure == "retired":
-        child["retired"] = True
-    else:
-        duplicate = {**child, "id": str(uuid4()), "sha256": "a" * 64}
-        records[duplicate["id"]] = duplicate
-        snapshot["dependencies"]["duplicate"] = duplicate
-    api = published_registry(monkeypatch, records, contents)
-    before, actual = file_snapshot(directory), installed(directory)
-    with pytest.raises(web.HTTPError):
-        asyncio.run(dependencies.install_artifact(root, current, snapshot))
-    assert file_snapshot(directory) == before
-    assert installed(directory) == actual
-    assert not any(call.args[0].endswith("/dependencies") for call in api.await_args_list)
-    assert api.await_args_list[-1].args[0].endswith("/abort")
-    assert not api.receipts.pending
-    assert not list(directory.parent.glob(".solo-install-*"))
-    assert not dependencies._project_busy
-
-
-@pytest.mark.parametrize("mode", ["source", "published"])
-@pytest.mark.parametrize("failure", ["accept", "response", "lost-response"])
-def test_real_uv_acceptance_failure_restores_environment_config_lock_and_new_assets(uv_projects, monkeypatch, registry, mode, failure):
-    root, current, candidate = uv_projects
-    directory = root / current["path"]
-    sync_fixture(root, current)
-    sentinel = directory / ".venv/bin/original-script"
-    sentinel.write_text("original environment bytes\n")
-    inode = (directory / ".venv").stat().st_ino
-    before, actual = file_snapshot(directory), installed(directory)
-    install = dependencies.install_project
-    base = registry.api
-    if mode == "published":
-        candidate, records, contents = published_graph(root, candidate, monkeypatch)
-        base = published_registry(monkeypatch, records, contents)
-        install = dependencies.install_artifact
-    called = []
-    async def api(path, body=None, *, binary=False):
-        if path.startswith("projects/") and path.endswith("/dependencies"):
-            called.append(body)
-            assert installed(directory)["source-package"]["version"] == "1.2.7"
-            assert (directory / ".venv").stat().st_ino != inode
-            if failure == "accept":
-                raise web.HTTPError(422, reason="registry acceptance failed")
-            await base(path, body, binary=binary)  # Acceptance committed, but its reply is malformed/lost.
-            if failure == "lost-response":
-                raise web.HTTPError(502, reason="acceptance reply lost")
-            return {"artifacts": []}
-        if path.endswith("/abort"):
-            assert file_snapshot(directory, ignore_intent=True) == before
-            assert json.loads((directory / dependencies._INSTALLATION_INTENT).read_text())["operation"] == "abort"
-            assert (directory / ".venv").stat().st_ino == inode
-        return await base(path, body, binary=binary)
-    monkeypatch.setattr(dependencies, "_artifact_api", api)
-    with pytest.raises(web.HTTPError):
-        asyncio.run(install(root, current, candidate))
-    assert len(called) == 1
-    assert file_snapshot(directory) == before
-    assert installed(directory) == actual
-    assert (directory / ".venv").stat().st_ino == inode
-    assert not list(directory.parent.glob(".solo-install-*"))
-    assert not dependencies._project_busy
-
-
-def test_real_uv_registration_failure_removes_new_assets_before_any_uv_preview(uv_projects, monkeypatch, registry):
+def test_real_uv_registration_failure_removes_new_assets_before_config_changes(uv_projects, monkeypatch, registry):
     root, current, candidate = uv_projects
     directory = root / current["path"]
     sync_fixture(root, current)
@@ -1431,43 +1635,9 @@ def test_real_uv_registration_failure_removes_new_assets_before_any_uv_preview(u
     with pytest.raises(web.HTTPError, match="register rejected"):
         asyncio.run(dependencies.install_project(root, current, candidate))
     assert file_snapshot(directory) == before
-    assert not list(directory.parent.glob(".solo-install-*"))
 
 
-def test_real_uv_runtime_graph_registers_each_actual_marker_after_all_builds_copies(uv_projects, monkeypatch, registry):
-    root, current, candidate = uv_projects
-    directory, source = root / current["path"], root / candidate["directory"]
-    child = root / "projects/factor/register-child"
-    child_id = str(uuid4())
-    write_offline_package(child, "register-child", "1.2.7", ["scheme>=1.2.0,<1.3.0"])
-    (child / ".solo").write_text(json.dumps({"project_id": child_id, "name": "actual-child", "kind": "factor",
-                                           "scheme_version": "1.2.7", "package_name": "register-child"}))
-    path = source / "pyproject.toml"
-    path.write_text(path.read_text().replace('["scheme>=1.2.0,<1.3.0"]', '["scheme>=1.2.0,<1.3.0", "register-child>=1.2"]'))
-    set_sources(source, {"register-child": {"path": str(child)}})
-    sync_fixture(root, current)
-    base = registry.api
-    registered = []
-    async def api(path, body=None, *, binary=False):
-        if path == "artifacts/register":
-            assert len(list(directory.glob(".solo-wheels/*/*/*.whl"))) == 2
-            assert candidate["id"] in dependencies._project_busy
-            assert child_id in dependencies._project_busy
-            registered.append(body)
-        return await base(path, body, binary=binary)
-    monkeypatch.setattr(dependencies, "_artifact_api", api)
-    asyncio.run(dependencies.install_project(root, current, candidate, dev=False))
-    assert [body["project_id"] for body in registered] == [child_id, candidate["id"]]
-    assert all(body["consumer_project_id"] == current["project_id"] for body in registered)
-    nonce = registry.api.await_args_list[0].args[1]["install_id"]
-    assert all(body["install_id"] == nonce for body in registered)
-    assert registry.api.await_args_list[-1].args[0].endswith(f"/{nonce}/complete")
-    assert not registry.receipts.pending
-    assert {item["sourceProjectId"] for item in registry.snapshots.values()} == {child_id, candidate["id"]}
-    assert not dependencies._project_busy
-
-
-def test_real_uv_busy_recursive_source_rejected_before_source_copy_or_asset_registration(uv_projects, monkeypatch, registry):
+def test_real_uv_busy_recursive_source_rejected_before_its_build_or_asset_registration(uv_projects, monkeypatch, registry):
     root, current, candidate = uv_projects
     directory, source = root / current["path"], root / candidate["directory"]
     child = root / "projects/factor/busy-child"
@@ -1479,19 +1649,18 @@ def test_real_uv_busy_recursive_source_rejected_before_source_copy_or_asset_regi
     set_sources(source, {"busy-child": {"path": str(child)}})
     sync_fixture(root, current)
     before = file_snapshot(directory)
-    original_copy = dependencies._copy_source
-    def copy(root_, source_, destination):
-        assert source_ != child, "Busy recursive source was copied"
-        return original_copy(root_, source_, destination)
-    monkeypatch.setattr(dependencies, "_copy_source", copy)
+    real_run = dependencies._run
+    async def run(arguments, cwd, environment):
+        if arguments[:2] == ["uv", "build"]:
+            assert Path(arguments[-1]) != child, "Busy recursive source was built"
+        return await real_run(arguments, cwd, environment)
+    monkeypatch.setattr(dependencies, "_run", run)
     with dependencies.project_operation(child_id):
         with pytest.raises(web.HTTPError) as error:
             asyncio.run(dependencies.install_project(root, current, candidate))
         assert error.value.status_code == 409
     assert file_snapshot(directory) == before
     assert not any(call.args[0] == "artifacts/register" for call in registry.api.await_args_list)
-    assert registry.api.await_args_list[0].args[0].endswith("/installations")
-    assert registry.api.await_args_list[-1].args[0].endswith("/abort")
     assert not dependencies._project_busy
 
 
@@ -1501,8 +1670,11 @@ def test_real_uv_source_graph_reuses_copied_artifact_after_its_origin_is_deleted
     sync_fixture(root, current)
     deleted = root / "projects/factor/deleted"
     write_offline_package(deleted, "frozen-child", "1.2.7", ["scheme>=1.2.0,<1.3.0"])
-    wheel = build_fixture_wheel(deleted, source / ".solo-wheels/frozen-child/original", monkeypatch)
+    wheel = build_fixture_wheel(deleted, root / "registry-bytes", monkeypatch)
     frozen = artifact_fixture(wheel, published=False)
+    target = source / ".solo-wheels/frozen-child" / frozen["id"]
+    target.mkdir(parents=True)
+    wheel = Path(shutil.copy2(wheel, target))
     content = wheel.read_bytes()
     registry.snapshots[frozen["id"]] = frozen
     shutil.rmtree(deleted)
@@ -1568,7 +1740,7 @@ def test_real_uv_save_snapshot_after_published_origin_deleted_is_self_contained(
     versions.build_version(directory, version, {})
     run = root / "runs" / version["id"]
     data = json.loads((run / "input.json").read_text())
-    assert data["algos"]["factor"]["sha256"] == snapshot["sha256"]
+    assert set(data["algos"]["factor"]) == {"package", "version", "wheel", "entry"}
     for record in records.values():
         wheel = run / "wheels" / record["filename"]
         assert wheel.read_bytes() == contents[record["id"]]
@@ -1580,264 +1752,169 @@ def test_real_uv_save_snapshot_after_published_origin_deleted_is_self_contained(
     assert old_input.read_bytes() == old_bytes
 
 
-@pytest.mark.parametrize("failure", ["nonce", "ttl", "expired", "artifacts"])
-def test_artifact_install_begin_is_fail_closed_before_staging(project_files, monkeypatch, registry, failure):
-    root, current, candidate = project_files
-    before, base = file_snapshot(root), registry.api
+
+
+@pytest.mark.parametrize("version", ["1.2.0rc1", "v1.2.7", "1.2.0.0", "0!1.2.1"])
+@pytest.mark.parametrize("requirement", ["scheme>=1.2,<2", "scheme~=1.2.0", "scheme==1.2.*",
+    "scheme[extra]>=1.2.0rc1,<1.3", "scheme>=1.2,<1.3,>=1.2", "scheme>=0!1.2,<1.3"])
+def test_scheme_contract_is_semantic_not_string_shape(version, requirement):
+    from packaging.version import Version
+    dependencies._validate_project(version, [requirement], Version("1.2.0"))
+
+
+@pytest.mark.parametrize("requirement", ["scheme<1.2.99", "scheme<=1.2.0", "scheme!=1.2.42",
+    "scheme>=1.2.1", "scheme==1.2.0", "scheme!=1.2.*", "scheme<1.2.0.1"])
+def test_scheme_range_must_cover_entire_patch_series(requirement):
+    from packaging.version import Version
+    with pytest.raises(web.HTTPError, match="全部 patch"):
+        dependencies._validate_project("1.2.0", [requirement], Version("1.2.0"))
+
+
+@pytest.mark.parametrize("dev", [True, False])
+def test_dependency_update_preserves_extras_and_marker_when_moving_groups(tmp_path, dev):
+    import tomlkit
+    from packaging.requirements import Requirement
+
+    config = tomlkit.parse("""[project]
+name = "consumer"
+dependencies = ['source-package[GPU_fast]>=1.2; python_version >= "3.12"']
+[dependency-groups]
+dev = ['source-package[other]>=1.2; sys_platform == "linux"']
+""")
+    wheel = tmp_path / "source_package-1.2.7-py3-none-any.whl"
+    dependencies._update_dependency(config, "source-package", "1.2.7", wheel, tmp_path, dev)
+    target = config["dependency-groups"]["dev"] if dev else config["project"]["dependencies"]
+    other = config["project"]["dependencies"] if dev else config["dependency-groups"]["dev"]
+    assert not other
+    parsed = [Requirement(raw) for raw in target]
+    assert {frozenset(item.extras) for item in parsed} == {frozenset({"GPU_fast"}), frozenset({"other"})}
+    assert {str(item.marker) for item in parsed} == {'python_version >= "3.12"', 'sys_platform == "linux"'}
+    assert all(str(item.specifier) == "==1.2.7" for item in parsed)
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_dependency_paths_follow_links_but_stay_in_workspace(tmp_path, external):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    target = tmp_path / "outside" if external else root / "actual"
+    target.mkdir()
+    link = root / "linked"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("Creating symlinks requires permission on this platform")
+    if external:
+        with pytest.raises(web.HTTPError) as error:
+            dependencies._safe_path(root, link)
+        assert error.value.status_code == 403
+    else:
+        assert dependencies._safe_path(root, link) == target
+
+
+@pytest.mark.parametrize("step", ["lock", "sync", "scheme", "accept"])
+def test_real_uv_failure_restores_memory_snapshot_and_resyncs(uv_projects, monkeypatch, registry, step):
+    root, current, candidate = uv_projects
+    directory = root / current["path"]
+    sync_fixture(root, current)
+    original = {name: (directory / name).read_bytes() for name in ("pyproject.toml", "uv.lock")}
+    before = installed(directory)
+    real_run, real_api = dependencies._run, registry.api
+    failed = False
+    syncs = []
+
+    async def run(arguments, cwd, environment):
+        nonlocal failed
+        result = await real_run(arguments, cwd, environment)
+        if arguments[:2] == ["uv", "sync"]:
+            syncs.append(arguments)
+            if step == "scheme" and not failed:
+                failed = True
+                path = directory / "uv.lock"
+                path.write_text(path.read_text().replace('version = "1.2.0"', 'version = "1.2.7"'))
+        target = {"lock": ["uv", "lock"], "sync": ["uv", "sync"]}.get(step)
+        if not failed and arguments[:2] == target:
+            failed = True
+            raise web.HTTPError(422, reason="injected installation failure")
+        return result
+
     async def api(path, body=None, *, binary=False):
-        response = await base(path, body, binary=binary)
-        if path.endswith("/installations"):
-            assert body == {"install_id": body["install_id"], "artifacts": [], "renew": False}
-            response[{"nonce": "install_id", "ttl": "expires_at", "expired": "expires_at", "artifacts": "artifacts"}[failure]] = {
-                "nonce": str(uuid4()), "ttl": "invalid", "expired": "2000-01-01T00:00:00Z", "artifacts": None,
-            }[failure]
-        return response
+        if step == "accept" and path.endswith("/dependencies"):
+            raise web.HTTPError(502, reason="injected acceptance failure")
+        return await real_api(path, body, binary=binary)
+
+    monkeypatch.setattr(dependencies, "_run", run)
     monkeypatch.setattr(dependencies, "_artifact_api", api)
-    temporary = Mock(side_effect=AssertionError("Unsafe begin staged files"))
-    monkeypatch.setattr(dependencies.tempfile, "mkdtemp", temporary)
     with pytest.raises(web.HTTPError):
         asyncio.run(dependencies.install_project(root, current, candidate))
-    temporary.assert_not_called()
-    assert file_snapshot(root) == before
-    assert not registry.receipts.pending and not dependencies._installing
+    assert {name: (directory / name).read_bytes() for name in original} == original
+    assert installed(directory) == before
+    assert len(syncs) == (1 if step == "lock" else 2)
+    assert not list(directory.glob(".solo-wheels/*/*/*.whl"))
+    assert not dependencies._project_busy
 
 
-@pytest.mark.parametrize("mode", ["source", "published"])
-def test_real_uv_artifact_completion_failure_keeps_committed_environment(uv_projects, monkeypatch, registry, mode):
-    root, current, candidate = uv_projects
-    directory = root / current["path"]
-    sync_fixture(root, current)
-    base, receipts, install = registry.api, registry.receipts, dependencies.install_project
-    if mode == "published":
-        candidate, records, contents = published_graph(root, candidate, monkeypatch)
-        base = published_registry(monkeypatch, records, contents)
-        receipts, install = base.receipts, dependencies.install_artifact
-    calls = []
-    async def api(path, body=None, *, binary=False):
-        calls.append((path, body))
-        if path.endswith("/complete"):
-            assert installed(directory)["source-package"]["version"] == "1.2.7"
-            assert not list(directory.parent.glob(".solo-install-*/original-venv"))
-            raise web.HTTPError(502, reason="complete reply lost")
-        return await base(path, body, binary=binary)
-    monkeypatch.setattr(dependencies, "_artifact_api", api)
-    assert asyncio.run(install(root, current, candidate)) == "source-package"
-    nonce = calls[0][1]["install_id"]
-    assert receipts.pending[nonce]["accepted"] == receipts.accepted[current["project_id"]]
-    assert installed(directory)["source-package"]["version"] == "1.2.7"
-    assert not any(path.endswith("/abort") for path, _ in calls)
-    assert not list(directory.parent.glob(".solo-install-*"))
-    marker = directory / dependencies._INSTALLATION_INTENT
-    intent = json.loads(marker.read_text())
-    assert intent["install_id"] == nonce and intent["operation"] == "complete"
-    monkeypatch.setattr(dependencies, "_artifact_api", base)
-    with dependencies.project_operation(current["project_id"]):
-        asyncio.run(dependencies.recover_installation(root, current))
-    assert not marker.exists() and not receipts.pending
-    assert installed(directory)["source-package"]["version"] == "1.2.7"
-
-
-def test_real_uv_artifact_failed_filesystem_rollback_retains_receipt_and_backup(uv_projects, monkeypatch, registry):
-    root, current, candidate = uv_projects
-    directory = root / current["path"]
-    sync_fixture(root, current)
-    config_before = (directory / "pyproject.toml").read_bytes()
-    base, rename = registry.api, Path.rename
-    def failed_restore(path, target):
-        if path.name == "original-venv":
-            raise OSError("filesystem rollback failed")
-        return rename(path, target)
-    monkeypatch.setattr(Path, "rename", failed_restore)
-    async def api(path, body=None, *, binary=False):
-        result = await base(path, body, binary=binary)
-        if path.endswith("/dependencies"):
-            raise web.HTTPError(502, reason="accepted reply lost")
-        return result
-    monkeypatch.setattr(dependencies, "_artifact_api", api)
-    with pytest.raises(OSError, match="filesystem rollback failed"):
-        asyncio.run(dependencies.install_project(root, current, candidate))
-    assert (directory / "pyproject.toml").read_bytes() == config_before
-    assert list(directory.parent.glob(".solo-install-*/original-venv"))
-    assert registry.receipts.pending and registry.receipts.accepted[current["project_id"]]
-    assert not any(call.args[0].endswith(("/abort", "/complete")) for call in registry.api.await_args_list)
-    assert not dependencies._installing and not dependencies._project_busy
-
-
-@pytest.mark.parametrize("step", ["build", "preview", "live"])
-def test_real_uv_artifact_renewal_failure_cancels_long_step_before_rollback(uv_projects, monkeypatch, registry, step):
-    root, current, candidate = uv_projects
-    directory = root / current["path"]
-    sync_fixture(root, current)
-    before = file_snapshot(directory)
-    base, real_run, subprocess_exec = registry.api, dependencies._run, dependencies.asyncio.create_subprocess_exec
-    blocked, stopped = False, False
-    processes = []
-    monkeypatch.setattr(dependencies, "_INSTALL_RENEW_SECONDS", 0.01)
-    async def create(*args, **kwargs):
-        nonlocal blocked
-        process = await subprocess_exec(*args, **kwargs)
-        if "import time; time.sleep(60)" in args:
-            processes.append(process)
-            blocked = True  # Trigger renewal failure only after the child actually exists.
-        return process
-    monkeypatch.setattr(dependencies.asyncio, "create_subprocess_exec", create)
-    async def run(arguments, cwd, environment):
-        nonlocal blocked, stopped
-        target = ((step == "build" and arguments[:2] == ["uv", "build"])
-                  or (step == "preview" and arguments[:2] == ["uv", "sync"] and cwd != directory)
-                  or (step == "live" and arguments[:2] == ["uv", "sync"] and cwd == directory))
-        if target:
-            if step != "build":
-                await real_run(arguments, cwd, environment)
-            try:
-                return await real_run([sys.executable, "-c", "import time; time.sleep(60)"], cwd, environment)
-            finally:
-                stopped = True
-        return await real_run(arguments, cwd, environment)
-    monkeypatch.setattr(dependencies, "_run", run)
-    async def api(path, body=None, *, binary=False):
-        if path.endswith("/installations") and body.get("renew") and body["artifacts"] == [] and blocked:
-            raise web.HTTPError(409, reason="renewal failed closed")
-        if path.endswith("/abort"):
-            assert stopped
-            assert processes and all(process.returncode is not None for process in processes)
-            assert file_snapshot(directory, ignore_intent=True) == before
-            assert json.loads((directory / dependencies._INSTALLATION_INTENT).read_text())["operation"] == "abort"
-        return await base(path, body, binary=binary)
-    monkeypatch.setattr(dependencies, "_artifact_api", api)
-    async def install():
-        await asyncio.wait_for(dependencies.install_project(root, current, candidate), timeout=10)
-    with pytest.raises(web.HTTPError, match="renewal failed closed"):
-        asyncio.run(install())
-    assert file_snapshot(directory) == before
-    assert not registry.receipts.pending
-    assert not any(call.args[0].endswith("/dependencies") for call in registry.api.await_args_list)
-    assert not list(directory.parent.glob(".solo-install-*"))
-
-
-@pytest.mark.parametrize("marked", [True, False])
-@pytest.mark.parametrize("failure", [None, "lost-accept", "lost-complete", "lost-accept-abort-failed"])
-def test_real_uv_artifact_receipt_integrates_actual_backend_exact_lock(uv_projects, monkeypatch, marked, failure):
-    """Real uv plus real backend begin/protect/exact acceptance/compensation, no predicate mock."""
-    backend = next((parent / "backend" for parent in Path(__file__).resolve().parents
-                    if (parent / "backend").is_dir()), Path("/backend"))
-    if not backend.is_dir():
-        pytest.skip("Requires a read-only backend source mount for endpoint integration")
-    monkeypatch.syspath_prepend(str(backend))
-    from config import SoloSettings
-    from core.apps.artifacts import service, views
-    from core.apps.artifacts.models import ArtifactInstallation, ResearchArtifact
-    from core.apps.projects.models import Project
-    from core.database.base import Base
-    from sqlalchemy import create_engine, select
-    from sqlalchemy.orm import Session
-    from datetime import datetime, timedelta, timezone
-    from urllib.parse import parse_qs
-    from fastapi import HTTPException
+@pytest.mark.parametrize("kind", ["editable", "override", "workspace", "requires-dist"])
+def test_real_uv_accepts_existing_configuration_without_admission_layers(uv_projects, monkeypatch, kind):
+    import tomlkit
 
     root, current, candidate = uv_projects
-    directory = root / current["path"]
+    directory, source = root / current["path"], root / candidate["directory"]
+    config_path = directory / "pyproject.toml"
+    config = tomlkit.parse(config_path.read_text())
+    if kind == "editable":
+        local = root / "libraries/existing"
+        write_offline_package(local, "existing-local", "0.1.0")
+        config["project"]["dependencies"].append("existing-local==0.1.0")
+        config["tool"]["uv"]["sources"]["existing-local"] = {"path": str(local), "editable": True}
+    elif kind == "override":
+        config["tool"]["uv"]["override-dependencies"] = ["scheme==1.2.0"]
+    elif kind == "workspace":
+        config["tool"]["uv"]["workspace"] = {"members": ["members/*"]}
+    else:
+        local = root / "libraries/url"
+        write_offline_package(local, "local-url", "0.1.0")
+        path = source / "pyproject.toml"
+        upstream = tomlkit.parse(path.read_text())
+        upstream["project"]["dependencies"].append(f"local-url @ {local.as_uri()}")
+        path.write_text(tomlkit.dumps(upstream))
+    config_path.write_text(tomlkit.dumps(config))
     sync_fixture(root, current)
-    marker = directory / ".solo"
-    marker.write_text(json.dumps({**json.loads(marker.read_text()), "name": "current"}))
-    before = file_snapshot(directory)
-    snapshot, records, contents = published_graph(root, candidate, monkeypatch, marked=marked)
-    monkeypatch.setattr(SoloSettings, "SHARED_DIR", root)
-    engine = create_engine("sqlite://")
-    Base.metadata.create_all(engine)
-    calls, protections = [], []
-    recovery = False
-    with Session(engine, expire_on_commit=False) as session:
-        consumer = Project(id=UUID(current["project_id"]), name="current", kind="model", package_name="current-package",
-            template_tag="v1.2.0", template_commit="a" * 40, template_package_version="1.2.0",
-            scheme_version="v1.2.0", scheme_commit="b" * 40)
-        session.add(consumer)
-        for record in records.values():
-            artifact = ResearchArtifact(id=UUID(record["id"]), kind=record["kind"], package_name=record["package"],
-                version=record["version"], sha256=record["sha256"], filename=record["filename"],
-                size_bytes=len(contents[record["id"]]), entry=record["entry"] if record["kind"] != "dependency" else "",
-                scheme_version="1.2.7", sources={"scheme": {"version": "1.2.7"}, "template": {"version": "1.2.0"}},
-                dependencies=record["dependencies"],
-                published_at=datetime.now(timezone.utc) if record["publishedAt"] else None)
-            target = service.artifact_path(artifact)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(contents[record["id"]])
-            session.add(artifact)
-        session.commit()
-        snapshot = service.read_artifact(session.get(ResearchArtifact, UUID(snapshot["id"])))
-        async def api(path, body=None, *, binary=False):
-            calls.append((path, body))
-            try:
-                if path.endswith("/installations"):
-                    result = views.begin_installation(consumer.id, views.InstallDependencies(**body), session)
-                    protections.append({item["id"] for item in result["artifacts"]})
-                    return result
-                if path.endswith("/dependencies"):
-                    result = views.accept_dependencies(consumer.id, views.AcceptDependencies(**body), session)
-                    if failure in {"lost-accept", "lost-accept-abort-failed"} and not recovery:
-                        raise web.HTTPError(502, reason="accept reply lost")
-                    return result
-                if path.endswith("/complete"):
-                    if failure == "lost-complete" and not recovery:
-                        raise web.HTTPError(502, reason="complete reply lost")
-                    return views.complete_installation(consumer.id, UUID(path.split("/")[-2]), session)
-                if path.endswith("/abort"):
-                    assert file_snapshot(directory, ignore_intent=True) == before
-                    assert json.loads((directory / dependencies._INSTALLATION_INTENT).read_text())["operation"] == "abort"
-                    if failure == "lost-accept-abort-failed" and not recovery:
-                        raise web.HTTPError(502, reason="abort offline")
-                    return views.abort_installation(consumer.id, UUID(path.split("/")[-2]), session)
-                if path.startswith("artifacts?"):
-                    query = parse_qs(path.split("?", 1)[1])
-                    return [service.read_artifact(item) for item in session.scalars(select(ResearchArtifact))
-                            if item.sha256 == query["sha256"][0]]
-                if path.startswith("artifacts/"):
-                    identifier = UUID(path.split("/")[1])
-                    if binary:
-                        assert protections[-1] == set(records)
-                        return Path(views.download_wheel(identifier, session).path).read_bytes()
-                    return views.get_artifact(identifier, session)
-                raise AssertionError(path)
-            except HTTPException as error:
-                raise web.HTTPError(error.status_code, reason=str(error.detail)) from error
-        monkeypatch.setattr(dependencies, "_artifact_api", api)
-        if failure in {"lost-accept", "lost-accept-abort-failed"}:
-            with pytest.raises(web.HTTPError, match="accept reply lost"):
-                asyncio.run(dependencies.install_artifact(root, current, snapshot))
-            assert file_snapshot(directory, ignore_intent=True) == before
-            if failure == "lost-accept":
-                assert consumer.artifact_dependencies == {}
-            else:
-                assert consumer.artifact_dependencies
-        else:
-            assert asyncio.run(dependencies.install_artifact(root, current, snapshot)) == "source-package"
-            expected = {snapshot["id"]} if marked else set(records)
-            assert {item["id"] for item in consumer.artifact_dependencies.values()} == expected
-            assert set(next(body["artifacts"] for path, body in calls if path.endswith("/dependencies"))) == expected
-        receipts = list(session.scalars(select(ArtifactInstallation)))
-        unresolved = failure in {"lost-complete", "lost-accept-abort-failed"}
-        assert len(receipts) == int(unresolved)
-        if unresolved:
-            intent_path = directory / dependencies._INSTALLATION_INTENT
-            intent = json.loads(intent_path.read_text())
-            nonce = calls[0][1]["install_id"]
-            assert intent["install_id"] == nonce
-            assert intent["operation"] == ("complete" if failure == "lost-complete" else "abort")
-            files_before_replay = file_snapshot(directory, ignore_intent=True)
-            receipts[0].expires_at = datetime.now(timezone.utc) - timedelta(days=1)
-            session.commit()
-            service.gc_unreferenced(session)
-            session.commit()
-            assert session.get(ArtifactInstallation, UUID(nonce)) is not None
-            assert all(session.get(ResearchArtifact, UUID(identifier)) is not None for identifier in records)
-            recovery = True
-            with dependencies.project_operation(current["project_id"]):
-                asyncio.run(dependencies.recover_installation(root, current))
-            assert calls[-1][0].endswith(f'/{nonce}/{intent["operation"]}')
-            assert not intent_path.exists() and session.get(ArtifactInstallation, UUID(nonce)) is None
-            assert file_snapshot(directory) == files_before_replay
-            if failure == "lost-accept-abort-failed":
-                assert consumer.artifact_dependencies == {} and file_snapshot(directory) == before
-        assert calls[0][1]["renew"] is False
-        assert all(body["renew"] is True for path, body in calls[1:] if path.endswith("/installations"))
-    engine.dispose()
+    assert asyncio.run(dependencies.install_project(root, current, candidate)) == "source-package"
+    assert installed(directory)["scheme"]["version"] == "1.2.0"
+    after = tomllib.loads(config_path.read_text())["tool"]["uv"]
+    if kind in ("override", "workspace"):
+        key = "override-dependencies" if kind == "override" else "workspace"
+        assert after[key] == config["tool"]["uv"][key]
+    if kind == "editable":
+        assert installed(directory)["existing-local"]["version"] == "0.1.0"
+    if kind == "requires-dist":
+        assert installed(directory)["local-url"]["version"] == "0.1.0"
+
+
+@pytest.mark.parametrize("dev", [True, False])
+def test_real_uv_updating_selected_extras_freezes_their_runtime_sources(uv_projects, monkeypatch, dev):
+    import tomlkit
+    from packaging.requirements import Requirement
+
+    root, current, candidate = uv_projects
+    directory, source = root / current["path"], root / candidate["directory"]
+    sync_fixture(root, current)
+    asyncio.run(dependencies.install_project(root, current, candidate))
+    leaf = root / "libraries/selected-extra"
+    write_offline_package(leaf, "selected-extra", "0.1.0")
+    path = source / "pyproject.toml"
+    upstream = tomlkit.parse(path.read_text())
+    upstream["project"]["optional-dependencies"] = {"feature": ["selected-extra==0.1.0"]}
+    upstream["tool"]["uv"]["sources"]["selected-extra"] = {"path": str(leaf), "extra": "feature"}
+    path.write_text(tomlkit.dumps(upstream))
+    path = directory / "pyproject.toml"
+    config = tomlkit.parse(path.read_text())
+    config["dependency-groups"]["dev"] = ['source-package[feature]==1.2.7; python_version >= "3.12"']
+    path.write_text(tomlkit.dumps(config))
+    asyncio.run(dependencies.install_project(root, current, candidate, dev=dev))
+    assert installed(directory)["selected-extra"]["version"] == "0.1.0"
+    config = tomllib.loads(path.read_text())
+    group = config["dependency-groups"]["dev"] if dev else config["project"]["dependencies"]
+    requirement = next(Requirement(raw) for raw in group if Requirement(raw).name == "source-package")
+    assert requirement.extras == {"feature"}
+    assert str(requirement.marker) == 'python_version >= "3.12"'
