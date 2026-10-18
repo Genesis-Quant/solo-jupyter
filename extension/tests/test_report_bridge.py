@@ -13,6 +13,14 @@ bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 
 
+FORWARD_SPECS = {
+    f"P5L{lag}": {
+        "kind": "simple", "periods": 5, "lag": lag,
+        "price_column": "open_hfq", "turnover_period": 5,
+    }
+    for lag in range(1, 4)
+}
+
 LAG_SPECS = {
     "r0o": {"kind": "simple", "periods": 1, "lag": 0, "session": "overnight", "turnover_period": 1},
     "r1": {"kind": "simple", "periods": 1, "lag": 1, "session": "intraday", "turnover_period": 1},
@@ -36,7 +44,9 @@ def report(kind="factor"):
     names = ("information_coefficient", "group_returns") if kind == "factor" else (
         "daily_portfolios", "trade_details", "daily_positions", "daily_trading_statistics")
     result = SimpleNamespace(report_kind=kind, filenames={name: name + ".parquet" for name in names})
-    result.parameters = SimpleNamespace(columns=["momentum"], max_lag=2, groups=5, n_select=10)
+    result.parameters = SimpleNamespace(
+        columns=["momentum"], period=5, price_column="open_hfq", max_lag=3, groups=5, n_select=10,
+    )
     def save(output):
         paths = []
         for filename in result.filenames.values():
@@ -83,8 +93,8 @@ def test_iframe_saves_manifest_and_links_frontend_without_embedded_assets(projec
     if kind == "factor":
         assert payload["parameters"] == {
             "factor_columns": ["momentum"],
-            "return_columns": ["r0o", "r1", "r1o", "r2"],
-            "return_specs": LAG_SPECS,
+            "return_columns": ["P5L1", "P5L2", "P5L3"],
+            "return_specs": FORWARD_SPECS,
             "n_groups": 5,
             "n_select": 10,
         }
@@ -99,7 +109,7 @@ def test_iframe_saves_manifest_and_links_frontend_without_embedded_assets(projec
 def test_factor_max_lag_metadata_without_scheme_properties(project, max_lag):
     workspace, _ = project
     current = report()
-    current.parameters.max_lag = max_lag
+    current.parameters = SimpleNamespace(columns=["momentum"], max_lag=max_lag, groups=5, n_select=10)
     value = bridge.report_iframe(current)
     path = parse_qs(urlsplit(iframe_url(value)).query)["path"][0]
     metadata = json.loads((workspace / path).read_text(encoding="utf-8"))["parameters"]
@@ -109,6 +119,65 @@ def test_factor_max_lag_metadata_without_scheme_properties(project, max_lag):
     assert len(metadata["return_columns"]) == len(set(metadata["return_columns"])) == 2 * max_lag
     assert not hasattr(current.parameters, "return_columns")
     assert not hasattr(current.parameters, "return_specs")
+
+
+@pytest.mark.parametrize("period", [1, 5])
+@pytest.mark.parametrize("max_lag", [1, 3])
+@pytest.mark.parametrize("price_column", ["open", "close", "open_hfq", "close_hfq"])
+def test_forward_metadata_uses_holding_period_and_entry_lag(project, period, max_lag, price_column):
+    workspace, _ = project
+    current = report()
+    current.parameters.period = period
+    current.parameters.max_lag = max_lag
+    current.parameters.price_column = price_column
+    value = bridge.report_iframe(current)
+    path = parse_qs(urlsplit(iframe_url(value)).query)["path"][0]
+    metadata = json.loads((workspace / path).read_text(encoding="utf-8"))["parameters"]
+    expected = {
+        f"P{period}L{lag}": {
+            "kind": "simple", "periods": period, "lag": lag,
+            "price_column": price_column, "turnover_period": period,
+        }
+        for lag in range(1, max_lag + 1)
+    }
+    assert metadata["return_columns"] == list(expected)
+    assert metadata["return_specs"] == expected
+    assert not hasattr(current.parameters, "return_columns")
+    assert not hasattr(current.parameters, "return_specs")
+
+
+@pytest.mark.parametrize("period", [True, False, 0, -1, 1.0, 1.5, "5", None])
+def test_invalid_forward_period_fails_without_legacy_fallback(project, period):
+    _, directory = project
+    current = report()
+    current.parameters.period = period
+    current.parameters.return_periods = [1]
+    with pytest.raises(ValueError, match="period"):
+        bridge.report_iframe(current)
+    current.save.assert_not_called()
+    assert not (directory / "reports").exists()
+
+
+@pytest.mark.parametrize("price_column", ["adj_open", "adj_factor", "open_qfq", "", 1, True, None, []])
+def test_invalid_forward_price_fails_without_legacy_fallback(project, price_column):
+    _, directory = project
+    current = report()
+    current.parameters.price_column = price_column
+    with pytest.raises(ValueError, match="price_column"):
+        bridge.report_iframe(current)
+    current.save.assert_not_called()
+    assert not (directory / "reports").exists()
+
+
+@pytest.mark.parametrize("field", ["period", "price_column", "max_lag"])
+def test_incomplete_forward_parameters_are_not_reinterpreted_as_legacy(project, field):
+    _, directory = project
+    current = report()
+    delattr(current.parameters, field)
+    with pytest.raises(ValueError, match=field):
+        bridge.report_iframe(current)
+    current.save.assert_not_called()
+    assert not (directory / "reports").exists()
 
 
 def test_factor_legacy_return_periods_keep_original_metadata(project):

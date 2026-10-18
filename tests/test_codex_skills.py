@@ -137,13 +137,14 @@ def test_discovery_does_not_start_model_turns():
     assert 'CODEX_HOME=str(codex_home)' in source
 
 
-def test_factor_skill_examples_use_max_lag_and_document_segment_boundaries():
+def test_factor_skill_examples_use_forward_periods_and_document_trading_day_boundaries():
     directory = SKILLS / "factor-analysis"
     for path in [directory / "SKILL.md", directory / "references/factor-contract.md", directory / "references/evaluation.md"]:
         text = path.read_text(encoding="utf-8")
         assert "max_lag" in text
-        assert "r0o" in text and "r1o" in text and "r2" in text
-        assert "simple" in text and "隔夜" in text and "日内" in text
+        assert "period" in text and "price_column" in text
+        assert "P5L1" in text and "P5L2" in text and "P5L3" in text
+        assert "simple" in text and "交易日" in text and "因子当日收盘价" in text
         assert "[start,end]" in text and "NULL" in text
         assert "close-to-close累计收益" in text
         assert "历史报告" in text or "篡改历史" in text
@@ -151,12 +152,16 @@ def test_factor_skill_examples_use_max_lag_and_document_segment_boundaries():
             tree = ast.parse(source)
             assert not any(isinstance(node, ast.keyword) and node.arg == "return_periods" for node in ast.walk(tree))
     contract = (directory / "references/factor-contract.md").read_text(encoding="utf-8")
-    assert "max_lag=2" in contract
+    assert 'period=5, price_column="open_hfq", max_lag=3' in contract
     assert "end + timedelta(days=1)" in contract
     assert "factor.validate(start,end,n_sample=5)" in contract
     assert "compute(d,d)" in contract
     assert "params.return_columns" in contract and "params.return_specs" in contract
-    for field in ("kind", "periods", "lag", "session", "turnover_period"):
+    assert 'return self.preprocess(' in contract
+    assert 'DosVar(result.data_ref), session=result.session, columns=["momentum"]' in contract
+    assert 'factors=["industry_l0", "circ_mv"]' in contract
+    assert "stdp" in contract and "SVD OLS" in contract
+    for field in ("kind", "periods", "lag", "price_column", "turnover_period"):
         assert field in contract
 
 
@@ -176,23 +181,27 @@ def test_current_factor_example_builds_without_execution():
     params = namespace["params"]
     assert params.periods == 20
     assert params.universe.pool == StockPool.SSE50
-    assert params.max_lag == 2
+    assert params.period == 5
+    assert params.price_column == "open_hfq"
+    assert params.max_lag == 3
     assert not hasattr(params, "return_periods")
-    assert params.return_columns == ["r0o", "r1", "r1o", "r2"]
+    assert params.return_columns == ["P5L1", "P5L2", "P5L3"]
     assert params.return_specs == {
-        "r0o": {"kind": "simple", "periods": 1, "lag": 0, "session": "overnight", "turnover_period": 1},
-        "r1": {"kind": "simple", "periods": 1, "lag": 1, "session": "intraday", "turnover_period": 1},
-        "r1o": {"kind": "simple", "periods": 1, "lag": 1, "session": "overnight", "turnover_period": 2},
-        "r2": {"kind": "simple", "periods": 1, "lag": 2, "session": "intraday", "turnover_period": 2},
+        f"P5L{lag}": {"kind": "simple", "periods": 5, "lag": lag, "price_column": "open_hfq", "turnover_period": 5}
+        for lag in range(1, 4)
     }
-    for settings in ({}, {"max_lag": 1}):
+    for settings in ({}, {"period": 1, "price_column": "open_hfq", "max_lag": 1}):
         single_lag = namespace["FactorReportForm"](
             start="2024-06-03", end="2024-06-08", pool=StockPool.SSE50,
             periods=20, **settings,
         ).build()
+        assert single_lag.period == 1
+        assert single_lag.price_column == "open_hfq"
         assert single_lag.max_lag == 1
-        assert single_lag.return_columns == ["r0o", "r1"]
-        assert single_lag.return_specs == {name: params.return_specs[name] for name in ("r0o", "r1")}
+        assert single_lag.return_columns == ["P1L1"]
+        assert single_lag.return_specs == {
+            "P1L1": {"kind": "simple", "periods": 1, "lag": 1, "price_column": "open_hfq", "turnover_period": 1}
+        }
     assert parameter_type(namespace["Factor"]) is namespace["FactorParams"]
 
 

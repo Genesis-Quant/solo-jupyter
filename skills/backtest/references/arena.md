@@ -4,7 +4,7 @@
 
 只有用户明确要求 Arena 且本会话实际连接其 MCP，才使用该分支。确认真实工具目录与当前请求/schema；不要要求不存在的 MCP CLI 命令，也不自行寻找 Token。没有连接时说明未执行，不创建项目、提交工作流或以本地脚本冒充 Arena 成功。
 
-Solo `scheme.data.query` 是 Runtime 接口，`scheme.data.backtest` 导出 Runtime 入口；导出存在不意味着当前四环节策略需要迁移到 Backend。Arena Backend Query 支持 JSON/Python 双源码，活动语言选择、完整 Backtest 请求与本地 Runtime JSON 是不同契约，按目标工具的当前文档构造，不抄一本固定请求协议。
+Solo `scheme.data.query` 是 Runtime 查询接口，`scheme.data.backtest` 保留 Runtime 请求/结果契约但将回测辅助DOS内联到当前session，只允许 `use query`。Solo默认四环节策略直接使用Python回放与 `Backtest` 插件，不依赖小写backtest模块；公开数据回测入口的存在不意味着当前策略需要迁移到Backend。Arena Backend Query 支持 JSON/Python 双源码，活动语言选择、完整 Backtest 请求与本地 Runtime JSON 是不同契约，按目标工具的当前文档构造，不抄一本固定请求协议。
 
 ## 八个完整 DolphinScript 回调
 

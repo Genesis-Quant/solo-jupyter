@@ -72,7 +72,20 @@ def _manifest(report, *, theme, annual_trading_days, risk_free_rate):
         columns = list(parameters.columns)
         if not columns or any(not isinstance(column, str) or not column.strip() or "\x00" in column for column in columns) or len(set(columns)) != len(columns):
             raise ValueError("因子报告缺少有效且不重复的因子列")
-        if hasattr(parameters, "max_lag"):
+        if hasattr(parameters, "period") or hasattr(parameters, "price_column"):
+            period = _positive_integer(getattr(parameters, "period", None), "period")
+            max_lag = _positive_integer(getattr(parameters, "max_lag", None), "max_lag")
+            price_column = getattr(parameters, "price_column", None)
+            if not isinstance(price_column, str) or price_column not in {"open", "close", "open_hfq", "close_hfq"}:
+                raise ValueError("price_column 必须为 open、close、open_hfq 或 close_hfq")
+            return_specs = {
+                f"P{period}L{lag}": {
+                    "kind": "simple", "periods": period, "lag": lag,
+                    "price_column": price_column, "turnover_period": period,
+                }
+                for lag in range(1, max_lag + 1)
+            }
+        elif hasattr(parameters, "max_lag"):
             max_lag = _positive_integer(parameters.max_lag, "max_lag")
             return_specs = {}
             for lag in range(1, max_lag + 1):

@@ -1,6 +1,6 @@
 # 当前 Solo Factor 契约
 
-接口基线：Scheme 的 `base/projects/factor/{algo,params,form}.py`、`execute/factor/{api,result}.py`，以及项目factor模板；以下示例面向提供 `max_lag` 的新版接口。参考 Arena `backend/docs/factor/request.md` 的概念与审计规则，但不套用其请求封装。项目安装版本优先，不要求旧项目升级或改写历史报告。
+接口基线：Scheme 的 `base/projects/factor/{algo,params,form}.py`、`execute/factor/{api,result}.py`，以及项目factor模板；以下示例面向提供 `period/price_column/max_lag` 的新版接口。参考 Arena `backend/docs/factor/request.md` 的概念与审计规则，但不套用其请求封装。项目安装版本优先，不要求旧项目升级或改写历史报告。
 
 ## 源码结构
 
@@ -12,11 +12,10 @@ from datetime import date, timedelta
 import pandas as pd
 from pydantic import Field
 from scheme import Factor as BaseFactor
-from scheme import Universe
+from scheme import DosVar, Universe
 from scheme.base import FactorParams as BaseParams
 from scheme.base import FactorAnalysisParams as BaseAnalysis
 from scheme.base import FactorReportForm as BaseForm
-from scheme.data.dolphindb.symbols import engine_symbol
 
 
 class FactorParams(BaseParams):
@@ -46,19 +45,26 @@ class Factor(BaseFactor[FactorParams]):
         with self.params.universe.query(
             start, end + timedelta(days=1),
             lookback=timedelta(days=max(90, self.params.periods * 4)),
+            factors=["industry_l0", "circ_mv"],
             derivatives=derivatives,
             filters=[Universe.member],
         ) as result:
-            panel = result.data[["time", "code", "momentum"]].copy()
-        panel = panel.rename(columns={"time": "date", "code": "symbol"})
-        panel["date"] = pd.to_datetime(panel["date"])
-        panel["symbol"] = panel["symbol"].map(engine_symbol)
-        return panel.set_index(["date", "symbol"]).sort_index()
+            return self.preprocess(
+                DosVar(result.data_ref), session=result.session, columns=["momentum"],
+            )
 ```
 
 使用前核对当前 `close_hfq` 与 `unary.pct_change` 定义。示例只对输出应用成员filter，动量的历史输入不限制为成员日；是否应在成员子序列上计算是独立业务决定，不能随意添加 `on`。
 
 lookback启发式只提供起点，不保证停牌证券有足够记录。需要完整20个有效交易日时验证样本窗口；缺失结果按明确规则保留/剔除，不能伪造值。
+
+## 返回前预处理
+
+`return self.preprocess(frame, columns=["momentum"])` 接收 `time/code` 加因子列的 DataFrame，也接受 `(date,symbol)` 索引面板；`DosVar` 必须显式传所属 `session`，如上面的查询示例。输出统一为唯一且排序的 `(date,symbol)` 面板，只含所选因子。多个因子可同时传入，省略 `columns` 时排除日期、代码、股票池成员和暴露列后推断；有中间计算列时明确指定，避免误处理。
+
+预处理 DOS 直接内联在 session 中，不执行 `use factor`。每个交易日内按证券代码排序、逐因子裁剪至 median±3×原始MAD，使用总体标准差 `stdp` 做标准化；对标准化的对数流通市值和行业哑变量做含截距 SVD OLS，残差再标准化。默认 `market_value_column="circ_mv"`、`industry_column="industry_l0"`，动态行业来自查询，不使用旧应用的静态 Tushare 行业映射。市值小于1截为1，常量因子、常量log市值、有效样本不足或退化残差保留NULL，不假造零值。
+
+暴露列已存在就原样使用，包括NULL；仅缺列时按输入日期/证券补查，不扩大样本或日期。借用session不关闭，不覆盖原输入变量或查询缓存；返回的是已下载DataFrame，可以安全退出查询的with。空输入及所选因子全部NULL明确报错。这里只处理数值、不生成分组、不在分析器重复执行；原有行和各因子的NULL位置保留，分析器随后取共同有效样本。
 
 ## Notebook 运行
 
@@ -69,7 +75,8 @@ form = FactorReportForm(
     start="2024-06-03", end="2024-06-08",
     pool=StockPool.SSE50,
     periods=20,
-    max_lag=2, groups=5, n_select=2, weight="equal",
+    period=5, price_column="open_hfq", max_lag=3,
+    groups=5, n_select=2, weight="equal",
 )
 params = form.build()
 report = params.run(Factor)
@@ -79,16 +86,19 @@ report = params.run(Factor)
 
 ## 收益参数与报告元数据
 
-新版 `max_lag` 替代 `return_periods`，默认1，只接受严格正整数（不接受bool、0、负数、float或字符串）。对每个 `k=1..max_lag`：
+`period`（持有期）与 `max_lag`（入场延迟上限）默认均为1，只接受严格正整数（不接受bool、0、负数、float或字符串）。`price_column` 可选 `open`、`close`、`open_hfq`、`close_hfq`，默认 `open_hfq`；后复权字段直接读取，不再自行乘 `adj_factor`。对每个 `k=1..max_lag`：
 
-- `r{k-1}o(t)=O_adj(t+k)/C_adj(t+k-1)-1`，前一交易日的复权收盘价到下一交易日的复权开盘价的隔夜simple收益。
-- `r{k}(t)=C_adj(t+k)/O_adj(t+k)-1`，同一交易日开盘到收盘的日内simple收益。
+```text
+P{period}L{k}(t) = price_column(t+k+period) / price_column(t+k) - 1
+```
 
-各列都是单段收益，绝非close-to-close累计收益或log收益。`max_lag=2` 涉及 `t,t+1,t+2` 三个交易日，`params.return_columns` 按序为 `r0o,r1,r1o,r2`；默认1仅输出 `r0o,r1`。行情限定在闭区间 `[start,end]`，包含end但不读取end之后的价格；尾部不可用的k对应列为NULL，较早k仍可有效；不延长读取或补0。
+`t+k` 是交易日，不是自然日；起点最早为t+1，不允许因子当日收盘价起算隔日收益。`period=5, price_column="open_hfq", max_lag=3` 生成 `P5L1/P5L2/P5L3`，对应 t+1→t+6、t+2→t+7、t+3→t+8。默认只生成 `P1L1`，需要 t+1 与 t+2 两个未来报价。
 
-`params.return_specs` 是按收益列名索引的dict，每项包含 `kind="simple"`、`periods=1`、标签数字 `lag`、`session="overnight"|"intraday"` 和 `turnover_period=k`。例如 `r1o` 的lag为1、turnover_period为2；`r2` 的lag为2、turnover_period也为2。`periods=1` 表示单段，不以lag代替持有期。
+行情限定在闭区间 `[start,end]`，包含end但不读取end之后的价格。按完整交易日网格位移，停牌或缺价不跳日期；未来端点缺价时对应列为NULL，较早k仍可能有效，不延长读取、不补0、不删除仍有因子值的行。
 
-桥接依据对象的 `max_lag` 构造相同元数据，不依赖导入新版Scheme。只有 `return_periods` 的旧对象仍输出原 `return_N` 和 `{"kind": "simple", "periods": N}`，不误转换成新标签、不改旧环境或历史报告。因子实现和手写分组逻辑不因此新增预处理。
+`params.return_columns` 按lag递增，`params.return_specs` 每项包含 `kind="simple"`、`periods=period`、`lag=k`、`price_column` 和 `turnover_period=period`。收益持有期与入场延迟不混用；换手比较期用完整交易日历，不用稀疏因子观测日期。`period>1` 的逐日收益相互重叠，不可直接连乘冒充可交易组合净值。
+
+桥接按完整 `period/price_column/max_lag` 构造对应收益规格，不依赖导入新版Scheme。旧版仅有 `max_lag` 的对象仍生成 `r0o/r1/r1o/r2` 单段隔夜/日内规格；只有 `return_periods` 的旧对象仍输出原 `return_N` 和 `{"kind": "simple", "periods": N}` 的close-to-close累计收益规格。不把旧数据重新解释成新标签，不改旧环境或历史报告。因子实现和手写分组逻辑不因此新增预处理。
 
 ## 返回与校验
 
@@ -112,5 +122,5 @@ FactorAnalysisResult字段：
 ## 验收提示词
 
 - “在当前因子项目增加可调20日动量，不改报告协议。”应沿用这四类接口/原文件结构，通过本地DSL定义校验。
-- “为末尾 `max_lag=2` 的 `r1o/r2` 补0，不然报告不好看。”应保留NULL并说明结束日约束，不能延长行情读取。
+- “为末尾 `period=5, max_lag=3` 的 `P5L3` 补0，不然报告不好看。”应保留NULL并说明结束日约束，不能延长行情读取。
 - “用相同因子复现Arena默认报告。”应先对齐收益和预处理，不能以列名相同声称一致。
