@@ -4,7 +4,7 @@
 
 ## 源码结构
 
-项目导出 `Factor`、`FactorParams`、`FactorAnalysisParams`、`FactorReportForm`。Params从 `scheme.base.FactorParams` 继承Universe，不保存 `start/end`；AnalysisParams同时继承项目Params与Scheme分析Params，由分析参数保存日期并传给 `compute`；表单绑定具体项目AnalysisParams。以下示例使用闭区间 `[start,end]` 的新接口，旧环境不自动改写日期语义。
+项目导出 `Factor`、`FactorParams`、`FactorAnalysisParams`、`FactorReportForm`。Params 从 `scheme.base.FactorParams` 继承 Universe，不保存 `start/end`；AnalysisParams 同时继承项目 Params 与 Scheme 分析 Params，由分析参数保存日期并传给 `compute`；表单绑定具体项目 AnalysisParams。因子输出只在 Factor 类上声明 `columns`，不在项目 AnalysisParams 重复声明、表单不提供该输入，也不传给 preprocess；Analysis 的同名字段默认为空列表，由保存/run/analyze 按类声明自动绑定为报告元数据，不需手填。以下示例使用闭区间 `[start,end]` 的新接口，旧环境不自动改写日期语义。
 
 ```python
 from datetime import date, timedelta
@@ -23,7 +23,7 @@ class FactorParams(BaseParams):
 
 
 class FactorAnalysisParams(FactorParams, BaseAnalysis):
-    columns: list[str] = Field(default_factory=lambda: ["momentum"], min_length=1)
+    pass
 
 
 class FactorReportForm(BaseForm[FactorAnalysisParams]):
@@ -31,6 +31,8 @@ class FactorReportForm(BaseForm[FactorAnalysisParams]):
 
 
 class Factor(BaseFactor[FactorParams]):
+    columns = ["momentum"]
+
     def compute(self, start: date, end: date) -> pd.DataFrame:
         if start > end:
             raise ValueError("因子日期区间必须满足 start <= end")
@@ -45,12 +47,11 @@ class Factor(BaseFactor[FactorParams]):
         with self.params.universe.query(
             start, end + timedelta(days=1),
             lookback=timedelta(days=max(90, self.params.periods * 4)),
-            factors=["industry_l0", "circ_mv"],
             derivatives=derivatives,
             filters=[Universe.member],
         ) as result:
             return self.preprocess(
-                DosVar(result.data_ref), session=result.session, columns=["momentum"],
+                DosVar(result.data_ref), session=result.session,
             )
 ```
 
@@ -60,11 +61,11 @@ lookback启发式只提供起点，不保证停牌证券有足够记录。需要
 
 ## 返回前预处理
 
-`return self.preprocess(frame, columns=["momentum"])` 接收 `time/code` 加因子列的 DataFrame，也接受 `(date,symbol)` 索引面板；`DosVar` 必须显式传所属 `session`，如上面的查询示例。输出统一为唯一且排序的 `(date,symbol)` 面板，只含所选因子。多个因子可同时传入，省略 `columns` 时排除日期、代码、股票池成员和暴露列后推断；有中间计算列时明确指定，避免误处理。
+`return self.preprocess(frame)` 接收 `time/code` 加因子列的 DataFrame，也接受 `(date,symbol)` 索引面板；数据可以完全来自本地计算，不要求先执行 query。`DosVar` 必须显式传所属 `session`，如上面的查询示例。输出列取自 Factor 类唯一的 `columns` 声明，不在 preprocess、AnalysisParams 或表单重复指定，也不从临时列推断；输出统一为唯一且排序的 `(date,symbol)` 面板。
 
-预处理 DOS 直接内联在 session 中，不执行 `use factor`。每个交易日内按证券代码排序、逐因子裁剪至 median±3×原始MAD，使用总体标准差 `stdp` 做标准化；对标准化的对数流通市值和行业哑变量做含截距 SVD OLS，残差再标准化。默认 `market_value_column="circ_mv"`、`industry_column="industry_l0"`，动态行业来自查询，不使用旧应用的静态 Tushare 行业映射。市值小于1截为1，常量因子、常量log市值、有效样本不足或退化残差保留NULL，不假造零值。
+预处理 DOS 在自有或借用的计算 session 中内联；暴露从另一个独立 query session 获取，不执行 `use factor`。每个交易日内按证券代码排序、逐因子裁剪至 median±3×原始MAD，使用总体标准差 `stdp` 做标准化；对标准化的对数流通市值和行业哑变量做含截距 SVD OLS，残差再标准化。默认 `market_value_column="circ_mv"`、`industry_column="industry_l0"`，动态行业来自查询，不使用旧应用的静态 Tushare 行业映射。市值小于1截为1，常量因子、常量log市值、有效样本不足或退化残差保留NULL，不假造零值。
 
-暴露列已存在就原样使用，包括NULL；仅缺列时按输入日期/证券补查，不扩大样本或日期。借用session不关闭，不覆盖原输入变量或查询缓存；返回的是已下载DataFrame，可以安全退出查询的with。空输入及所选因子全部NULL明确报错。这里只处理数值、不生成分组、不在分析器重复执行；原有行和各因子的NULL位置保留，分析器随后取共同有效样本。
+preprocess 始终另开自有（owned）query，按输入日期与证券获取行业/市值暴露后 join 因子；因子原查询不预取暴露，输入已有同名列也不替代这次独立读取。独立查询负责关闭自己的 session，借用的因子 session 不关闭，不覆盖原输入变量或查询缓存；返回的是已下载 DataFrame，可以安全退出因子查询的 with。空输入及声明因子全部 NULL 明确报错。这里只处理数值、不生成分组、不在分析器重复执行；不扩大输入日期/证券域，原有行和各因子的 NULL 位置保留，分析器随后取共同有效样本。
 
 ## Notebook 运行
 
@@ -115,7 +116,7 @@ FactorAnalysisResult字段：
 - `group_turnover`
 - `parameters`
 
-`compute` 要求 `(date,symbol)` 唯一MultiIndex；所有请求因子列必须为数值；日期不得越界。规范化代码之后重复也无效。无穷因子转换为NaN，分析器取共同有效因子样本。不得以空表/0替代报错来假造成功。
+`compute` 的返回列须与 Factor.columns 完全一致，不能夹带暴露或未声明中间列；可以返回 `(date,symbol)` 唯一 MultiIndex，也可返回 `time/code` 平表，由包装层转为同一面板。所有声明因子列必须为数值；日期不得越界。规范化代码之后重复也无效。无穷因子转换为NaN，分析器取共同有效因子样本。不得以空表/0替代报错来假造成功。
 
 市值加权要求有效样本具有正数 `circ_mv`；等权不需要把市值作为因子输出列。不要把因子分组变化当作真实订单换手。
 

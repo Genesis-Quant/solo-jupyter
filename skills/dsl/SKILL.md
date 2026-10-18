@@ -9,7 +9,7 @@ description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到
 
 默认服务 Solo Jupyter 研究项目。先读取项目 `pyproject.toml`、`uv.lock`、算法源码，使用该项目 `.venv/bin/python`，不要用 Jupyter Server 的全局 Python 或自动升级依赖。
 
-- **Solo 本地**：`scheme.data.query`、`Universe.query` 使用 Runtime JSON 节点。在 Python 文件中写字典也是 JSON DSL，不是 Arena 的 Python DSL 编译器。
+- **Solo 本地**：`scheme.data.query` 是使用 Runtime 请求/结果类型的本地直接执行包装，不是 `execute_query` 的 alias；它与 `Universe.query` 使用 Runtime JSON 节点。在 Python 文件中写字典也是 JSON DSL，不是 Arena 的 Python DSL 编译器。
 - **Arena 远端**：只有用户明确操作 Arena 且当前工具确实提供对应 MCP 时，才使用双源码和 `compile_python_dsl`。见 [Arena 适配边界](references/arena-adapter.md)。
 - Skill 是本地文档和检查程序，不会凭空提供 Arena MCP，不改变运行账号权限。
 
@@ -56,9 +56,9 @@ description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到
 - `on` 限定参与计算的行，未参与行产生 NULL，**不删行**。`filters` 在派生计算后按 AND 删行，只能引用顶层 BOOL 派生列。
 - 数值字段不是 BOOL。对价格、`is_st`、权重先使用比较或类型明确的 BOOL 算符。
 - JSON 中字符串可以引用基础列或命名派生列；Arena Python 源码对本地派生列必须引用 OP 变量。
-- Solo 的 `Universe.member` 是 `"stock_pool_member"`；`Universe.query` 注入它，但不自动加入 `filters`。不要自行重定义。
-- Runtime Query 的 `end_date` 包含该日；Solo `Universe.query(start, end)` 和研究参数是 `[start, end)`。
-- `codes=[]` 表示全市场，不表示空股票池；空候选不能直接当空列表查询。
+- Solo 的 `Universe.member` 是 `"stock_pool_member"`；`dataset_query` 注入它并保留 `codes=[]`，`Universe.query` 只执行这一次查询，不做本地 `codes_query` 预选，也不自动加入 `filters`。不要自行重定义；已构造对象可直接交给 `scheme.data.query` 执行。
+- Runtime Query 的 `end_date` 包含该日；Solo `Universe.query(start, end)` 和策略研究参数是 `[start, end)`，新版因子计算/分析为 `[start,end]`，调用 Universe 时加一天。
+- 本地 `codes=[]` 表示使用进程固定全市场证券域，不表示空股票池；每进程首次从 CoreData 全历史所有记录取 distinct codes 缓存为 tuple，后续复用，不依赖请求日期或 `close`，显式 `codes` 不改。`evaluate` 返回交易日×固定证券域 BOOL 面板，无成分日为全 False、不因缺行情缩列；日期轴仍按真实 `close` 交易日确定。空候选不能直接当空列表查询。
 - `lookback` 是日历时长，不是交易日数；负 shift 和未来标签只能用于评价，不能作为交易信号。
 - 截面计算必须保留完整参与域。只查最终入选股票不能复现原排名或标准化结果。
 

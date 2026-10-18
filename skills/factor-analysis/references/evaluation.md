@@ -30,7 +30,7 @@ P{period}L{k}(t) = price_column(t+k+period) / price_column(t+k) - 1
 
 ## 预处理
 
-在 `Factor.compute` 返回前调用 `self.preprocess(...)` 显式执行预处理，分析器不重复处理。该方法接收 `DosVar` 加所属session，或 `time/code/因子列` DataFrame，统一返回 `(date,symbol)` 面板；数字处理由内联DOS完成，不加载factor模块。
+Factor 类唯一声明输出 `columns`，Form 不提供输入、AnalysisParams 无需手填；其默认空列表字段由执行流程按类声明自动写入报告元数据；在 `Factor.compute` 返回前调用 `self.preprocess(frame)` 显式执行预处理，不传 columns，分析器不重复处理。输入可以完全来自本地 DataFrame，不要求是 query 结果；也支持 `DosVar` 加所属 session。preprocess 始终另开自有（owned）query，按输入日期与证券获取动态行业/市值暴露，再 join 因子，不预取或沿用输入暴露，不改写原查询缓存。输出统一为 `(date,symbol)` 面板，数字处理由内联 DOS 完成，不加载 factor 模块；独立查询回收自己的 session，不关闭借用的因子 session。
 
 每日截面按code排序、逐因子过滤有效输入，市值小于1截为1，对数市值用 `stdp` 标准化；原始因子做 median±3×MAD（无1.4826系数）去极值和 `stdp` 标准化；行业字符串排序后去首类构建哑变量，含截距SVD OLS；有效样本不足或残差低于浮点容限时留NULL，否则残差再标准化。默认使用动态 `industry_l0` 和 `circ_mv`，行业来源不同于旧应用静态Tushare映射，不能声称数值结果完全相同。
 
@@ -39,7 +39,7 @@ P{period}L{k}(t) = price_column(t+k+period) / price_column(t+k) - 1
 ## 比较清单
 
 1. 样本区间、lookback和是否含结束日；收益是否读取超界。
-2. 动态池候选并集、逐日成员和实际参与CS的截面。
+2. Solo 的进程固定证券域、Arena 的候选域、逐日成员与实际参与 CS 的截面；本地 Universe 单次注入成员但不自动过滤，不套用远端的 codes_query 流程。
 3. 因子价格尺度、窗口、信号方向、NaN/无穷处理。
 4. `period`、`price_column`、入场lag、simple/log和复权数据来源。
 5. 共同因子有效域、标签有效域、停牌或缺行情行。
@@ -47,7 +47,7 @@ P{period}L{k}(t) = price_column(t+k+period) / price_column(t+k) - 1
 7. 相同数据版本和供应商历史修订；point-in-time归档是否存在。
 8. 各结果表的键、日期轴、NULL掩码和数值容差，不只比较一个汇总指标。
 
-执行统计的初始代码数可能因候选域定义不同而不同；应区分初始覆盖数和最终有效样本，而非改统计数掩盖差异。
+Solo 每进程首次 `codes=[]` 的证券域来自 CoreData 全历史所有记录的 distinct codes tuple，后续复用、不按日期或 `close` 缩小，显式代码不改；`evaluate` 保留交易日×固定代码域的 BOOL 面板，无成分为 False。执行统计的初始代码数可能因两端数据域定义不同而不同；应区分初始覆盖数和最终有效样本，而非改统计数掩盖差异。
 
 ## 指标解释
 

@@ -43,12 +43,12 @@ with universe.query(
 
 此例`end`不含6月8日，并**显式选择**只保留当日成员。若要保留非成员行，移除filters；若只要求某个TS/CS节点在成员内计算，将 `Universe.member` 用于该节点的 `on`。
 
-- 全市场 `StockPool.ALL` 没有第一阶段，第二阶段注入恒真成员列。
-- 指数池第一阶段查询区间内候选并集，第二阶段只读取候选代码，再按每日成员判断。
+- `scheme.data.query` 是本地直接执行包装，不是 Runtime `execute_query` 的 alias。每进程第一次收到 `codes=[]` 时，从 CoreData 全历史所有记录读取 distinct codes 并缓存为 tuple；不按请求日期、lookback 或 `close` 筛代码。后续空列表复用该域，显式代码列表原样保留，导入模块不连接数据库。
+- 全市场 `StockPool.ALL` 注入恒真成员列；指数池在同一固定证券域上注入每日成员判断，只执行一次查询，没有本地 `codes_query` 预筛选。远端 Arena 自身的 `codes_query` 契约不因此改变，不能把两者混用。
 - 支持 `ALL/SSE50/CSI300/CSI500/CSI1000`；具体字段由当前实现决定，不手写指数权重替代Universe的公共契约。
 - `Universe.member` 是类属性字符串，不是方法，也不是Pydantic输入字段。
-- `universe.evaluate(start, end)` 返回日期×候选代码的BOOL面板，非成员False，不返回某一天固定的股票列表。
-- `universe.dataset_query(...)` 用于构造/检查第二阶段规范，尚未填入第一阶段候选代码，**不要直接执行它来跳过两阶段流程**。
+- `universe.evaluate(start, end)` 返回交易日×固定代码域的 BOOL 面板（列为 `.XSHG/.XSHE`），非成员和缺失成员为 False；某天或整个区间无成分也保留全 False，不缩列，不返回某一天固定的股票列表。日期轴仍取请求区间内真实 `close` 交易日，不能将代码域不依赖 `close` 误解为无日期轴约束。
+- `universe.dataset_query(...)` 只构造已注入成员节点、`codes=[]` 的完整查询，不连接数据库。它可直接交给 `scheme.data.query(request)` 执行；`Universe.query(...)` 正是单次执行该对象，空 `codes` 使用同一份进程级证券列表，不需要补候选代码。
 
 ## 会话与结果
 
@@ -63,5 +63,5 @@ QueryResult 的上下文管理器负责关闭会话。`.data` 将实际数据取
 ## 验收提示词
 
 - “只读取2024-06-03至06-07沪深300当日成员的收盘价。”应选Universe闭开区间和显式成员filter。
-- “查询沪深300期间所有候选股票，保留非成员日用于之后退出。”应保留成员列、不默认filter，并解释候选与当日成分区别。
+- “查询沪深300逐日成员，保留非成员日用于之后退出。”应在进程固定证券域上保留成员列、不默认 filter，并解释固定证券域与当日成分的区别。
 - “这次代码列表为空，可以照常传吗？”应明确全市场风险，而不是默默查询。

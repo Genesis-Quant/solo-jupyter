@@ -10,12 +10,12 @@ import sys
 from importlib.metadata import version
 from scheme import Universe
 from scheme.data import query
-from runtime.apps.query import FactorQuery, execute_query
+from runtime.apps.query import FactorQuery
 
 print(sys.executable, sys.version.split()[0])
 for name in ("scheme", "backtest", "dolphindb", "arena-runtime"):
     print(name, version(name))
-print(query is execute_query)
+print(query.__module__, inspect.getfile(query))
 print(inspect.signature(query))
 print(inspect.signature(Universe.query))
 print(FactorQuery.model_json_schema())
@@ -28,12 +28,12 @@ print(FactorQuery.model_json_schema())
 | 接口 | 输入与日期 | 结果 |
 | --- | --- | --- |
 | `scheme.data.query(request, *, session=None)` | Runtime `FactorQuery` 或字典；`start_date/end_date` 闭区间 | `QueryResult`，惰性下载并持有 session |
-| `Universe.query(start, end, *, lookback, factors, derivatives, filters)` | Python `date` 的 `[start, end)` | 同一 session 内完成候选域与数据查询 |
+| `Universe.query(start, end, *, lookback, factors, derivatives, filters)` | Python `date` 的 `[start, end)` | 单次执行注入成员节点、`codes=[]` 的 `dataset_query` |
 | `DolphinDB session.run(script)` | 原样 DolphinScript | 脚本最后一个表达式的值；不是工作流结果 |
 
 `Universe` 从 `scheme` 或 `scheme.data.dolphindb.universe` 导入，不能假定 `scheme.data` 导出它。
 
-### 只离线构造，不执行未填候选域的请求
+### 离线构造完整的单次查询请求
 
 ```python
 from datetime import date
@@ -46,16 +46,16 @@ request = universe.dataset_query(
 )
 assert isinstance(request.end_date, str)
 assert request.end_date == "2026-01-09"
-assert request.codes == []  # 尚未注入第一阶段候选代码。
+assert request.codes == []  # 执行时由本地 query 补齐进程固定证券域。
 assert request.filters == []
 assert Universe.member in request.derivatives
 ```
 
-此处 `end_date` 在版本基线中是字符串。`dataset_query` 只构造第二阶段请求，指数池尚未注入候选 codes；不要直接执行 `query(request)`，因为 Runtime 的 `codes=[]` 表示全市场，不是指数候选池。
+此处 `end_date` 在版本基线中是字符串。`dataset_query` 只构造已注入成员节点的完整请求，不连接数据库；它保留 `codes=[]`，可在确认运行范围后直接交给 `scheme.data.query(request)` 执行，不需要补入候选代码。`scheme.data.query` 是本地直接执行包装，不是 Runtime `execute_query` 的别名：每进程首次空 `codes` 从 CoreData 全历史所有记录读取 distinct codes 并缓存为 tuple，不按日期、lookback 或 `close` 取代码；后续空列表复用，显式 `codes` 原样保留，导入不联网。证券域不依赖 `close`，但每次查询的日期轴仍取区间内真实 `close` 交易日。
 
-### 实际指数池查询走 Universe.query
+### 用 Universe.query 执行同一请求
 
-以下函数只有被显式调用时才连接服务；先确认用户授权、区间、股票池和返回规模，再调用。两个阶段由 `Universe.query` 在同一 session 中执行。
+以下函数只有被显式调用时才连接服务；先确认用户授权、区间、股票池和返回规模，再调用。`Universe.query` 单次执行 `dataset_query`，不进行本地 `codes_query` 预选。若要缩小最终返回规模，按业务显式加成员 filters；短日期区间本身不会缩小固定证券域。
 
 ```python
 from datetime import date
@@ -69,9 +69,9 @@ def query_small_index_window():
         return result.data
 ```
 
-成员节点不能重定义；全市场没有第一阶段，成员为恒真。指数池第一阶段取期间代码并集，第二阶段输出逐日成员，不自动删行。需要成员门控时显式选择参与域或 `filters`；详见 DSL/数据查询技能。
+成员节点不能重定义；全市场成员为恒真。指数池在同一固定证券域上逐日判断成员，成员只作为 BOOL 列输出，不自动删行。需要成员门控时显式选择参与域 `on` 或 `filters`。`evaluate(start,end)` 返回交易日×固定证券域的 BOOL 面板（`.XSHG/.XSHE` 列），非成员及缺失成员为 False，某天或整个区间无成分也保留全 False，不因缺行情缩列；详见 DSL/数据查询技能。
 
-`.data` 会下载完整最终结果，`.head()` 发生在下载之后；不要用大范围请求做预览。需要少量列/行时，在结果块内用 `result.session` 对 `result.data_ref` 做有界投影。`source_ref/computed_ref/filtered_ref/data_ref` 是 session 引用，退出后不可继续查询。即使传入已有 session，也核对结果对象的所有权与关闭规则，避免多个存活结果交叉覆盖引用。只有独立、明确限定 codes 的 Runtime 查询才直接使用 `scheme.data.query`，不要绕开 Universe 的候选域步骤。
+`.data` 会下载完整最终结果，`.head()` 发生在下载之后；不要用大范围请求做预览。需要少量列/行时，在结果块内用 `result.session` 对 `result.data_ref` 做有界投影。`source_ref/computed_ref/filtered_ref/data_ref` 是 session 引用，退出后不可继续查询。即使传入已有 session，也核对结果对象的所有权与关闭规则，避免多个存活结果交叉覆盖引用。`scheme.data.query` 可直接执行静态代码请求或 Universe 构造的完整请求；`codes=[]` 有意使用进程固定全市场域，不是空池或待补候选，不存在需要绕开的本地两阶段步骤。
 
 ## 已有环境凭据与关闭 session
 

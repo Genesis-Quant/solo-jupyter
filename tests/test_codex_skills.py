@@ -158,8 +158,10 @@ def test_factor_skill_examples_use_forward_periods_and_document_trading_day_boun
     assert "compute(d,d)" in contract
     assert "params.return_columns" in contract and "params.return_specs" in contract
     assert 'return self.preprocess(' in contract
-    assert 'DosVar(result.data_ref), session=result.session, columns=["momentum"]' in contract
-    assert 'factors=["industry_l0", "circ_mv"]' in contract
+    assert 'DosVar(result.data_ref), session=result.session' in contract
+    assert 'columns = ["momentum"]' in contract
+    assert 'factors=["industry_l0", "circ_mv"]' not in contract
+    assert 'columns=["momentum"]' not in contract
     assert "stdp" in contract and "SVD OLS" in contract
     for field in ("kind", "periods", "lag", "price_column", "turnover_period"):
         assert field in contract
