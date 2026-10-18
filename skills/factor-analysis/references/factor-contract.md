@@ -87,19 +87,35 @@ report = params.run(Factor)
 
 ## 收益参数与报告元数据
 
-`period`（持有期）与 `max_lag`（入场延迟上限）默认均为1，只接受严格正整数（不接受bool、0、负数、float或字符串）。`price_column` 可选 `open`、`close`、`open_hfq`、`close_hfq`，默认 `open_hfq`；后复权字段直接读取，不再自行乘 `adj_factor`。对每个 `k=1..max_lag`：
+`period`（持有期）与 `max_lag`（入场延迟上限）默认均为1，只接受严格正整数（不接受bool、0、负数、float或字符串）。`price_column` 可选 `open`、`close`、`open_hfq`、`close_hfq`，默认 `open_hfq`；入场与退出使用同一价格字段，后复权字段直接读取，不再自行乘 `adj_factor`。当前所有因子评价收益均为log，对每个 `k=1..max_lag`：
 
 ```text
-P{period}L{k}(t) = price_column(t+k+period) / price_column(t+k) - 1
+P{period}L{k}(t) = ln(price_column(t+k+period) / price_column(t+k))
 ```
 
-`t+k` 是交易日，不是自然日；起点最早为t+1，不允许因子当日收盘价起算隔日收益。`period=5, price_column="open_hfq", max_lag=3` 生成 `P5L1/P5L2/P5L3`，对应 t+1→t+6、t+2→t+7、t+3→t+8。默认只生成 `P1L1`，需要 t+1 与 t+2 两个未来报价。
+`lag=k>=1`，`t+k` 是交易日，不是自然日；起点最早为t+1，不允许因子当日收盘价起算隔日收益。`period=5, price_column="open_hfq", max_lag=3` 生成 `P5L1/P5L2/P5L3`，对应 t+1→t+6、t+2→t+7、t+3→t+8。默认只生成 `P1L1`，需要 t+1 与 t+2 两个未来报价。这里定义的是评价标签，不改变上文compute中的动量因子公式。
 
-行情限定在闭区间 `[start,end]`，包含end但不读取end之后的价格。按完整交易日网格位移，停牌或缺价不跳日期；未来端点缺价时对应列为NULL，较早k仍可能有效，不延长读取、不补0、不删除仍有因子值的行。
+行情限定在闭区间 `[start,end]`，包含end但不读取end之后的未来区间。按完整交易日网格位移，不能在稀疏因子面板上位移，停牌或缺价不跳日期；入场或退出端点缺价或非正时对应列为NULL，较早k仍可能有效，不延长读取、不补0、不删除仍有因子值的行。
 
-`params.return_columns` 按lag递增，`params.return_specs` 每项包含 `kind="simple"`、`periods=period`、`lag=k`、`price_column` 和 `turnover_period=period`。收益持有期与入场延迟不混用；换手比较期用完整交易日历，不用稀疏因子观测日期。`period>1` 的逐日收益相互重叠，不可直接连乘冒充可交易组合净值。
+`params.return_columns` 按lag递增，`params.return_specs` 每项包含 `kind="log"`、`periods=period`、`lag=k`、`price_column` 和 `turnover_period=period`。收益持有期与入场延迟不混用；换手比较期用完整交易日历，不用稀疏因子观测日期。
 
-桥接按完整 `period/price_column/max_lag` 构造对应收益规格，不依赖导入新版Scheme。旧版仅有 `max_lag` 的对象仍生成 `r0o/r1/r1o/r2` 单段隔夜/日内规格；只有 `return_periods` 的旧对象仍输出原 `return_N` 和 `{"kind": "simple", "periods": N}` 的close-to-close累计收益规格。不把旧数据重新解释成新标签，不改旧环境或历史报告。因子实现和手写分组逻辑不因此新增预处理。
+桥接校验完整 `period/price_column/max_lag` 后，直接使用报告参数的 `return_specs`，不凭参数形状强制改写收益类型。Scheme 1.10 起生成log标签，1.8/1.9的simple结果保留其实际规格。旧版仅有 `max_lag` 的对象仍生成 `r0o/r1/r1o/r2` 单段隔夜/日内规格；只有 `return_periods` 的旧对象仍输出原 `return_N` 和 `{"kind": "simple", "periods": N}` 的close-to-close累计收益规格。不把旧数据重新解释成新标签，不改旧环境或历史报告。因子实现和手写分组逻辑不因此新增预处理。
+
+## 报告有效收益与曲线
+
+各组raw收益仍是当日有效log标签的加权均值（按所选等权或市值权），不先对单个标签除以持有期；IC/RankIC直接使用当日因子与原始log标签，不平滑。
+
+对每个因子、收益列和分组，在报告完整交易日轴上计算：
+
+```text
+effective(t) = mean(raw(t), ..., raw(t-period+1))
+```
+
+这是当前及前 `period-1` 个交易期raw log收益的算术平均；序列开头不足period时使用已有样本，不额外除以period，不平均不同lag。先补齐完整交易日轴，缺失日期保留NULL；窗口中任一raw为NULL，当期effective即为NULL，不跳过NULL求均值。日期选择先在报告全表计算窗口再截取，不能在所选起点重启窗口；`period=1`使用同一规则。
+
+分组净值为 `exp(cumsum(effective))`。多空先取同日 `high-low` raw log收益，再使用同一窗口及NULL规则；时序 `value=effective` 为log，`cumulative=cumsum(effective)` 为logsum，不是简单收益或净值。
+
+均值、年化、波动率与Sharpe都使用同一有效序列的非NULL观测：均值为logmean，年化为 `logmean*252`，波动率为 `std(effective)*sqrt(252)`，零无风险利率下Sharpe为 `logmean/std(effective)*sqrt(252)`。所有持有期统一生成曲线和统计；NULL日期留断点、不补零，不可定义的指标保留NULL。
 
 ## 返回与校验
 

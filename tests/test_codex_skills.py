@@ -144,8 +144,27 @@ def test_factor_skill_examples_use_forward_periods_and_document_trading_day_boun
         assert "max_lag" in text
         assert "period" in text and "price_column" in text
         assert "P5L1" in text and "P5L2" in text and "P5L3" in text
-        assert "simple" in text and "交易日" in text and "因子当日收盘价" in text
-        assert "[start,end]" in text and "NULL" in text
+        assert "log" in text and "交易日" in text and "因子当日收盘价" in text
+        assert 'kind="log"' in text
+        assert "[start,end]" in text and "NULL" in text and "非正" in text
+        compact = re.sub(r"\s+", "", text)
+        for formula in (
+            "P{period}L{k}(t)=ln(price_column(t+k+period)/price_column(t+k))",
+            "effective(t)=mean(raw(t),...,raw(t-period+1))",
+            "exp(cumsum(effective))",
+            "value=effective",
+            "cumulative=cumsum(effective)",
+            "logmean*252",
+            "std(effective)*sqrt(252)",
+            "logmean/std(effective)*sqrt(252)",
+        ):
+            assert formula in compact, (path, formula)
+        assert "加权均值" in text and "不平滑" in text
+        assert "不额外除以period" in compact and "不平均不同lag" in compact
+        assert "已有样本" in text and "完整交易日轴" in text
+        assert "任一" in text and "全表" in text and "再截取" in text
+        assert "period=1" in text and "同一规则" in text and "high-low" in text
+        assert not any(term in text for term in ("重叠", "overlap", "不可复利"))
         assert "close-to-close累计收益" in text
         assert "历史报告" in text or "篡改历史" in text
         for source in re.findall(r"^```python\s*\n(.*?)^```", text, re.M | re.S):
@@ -189,7 +208,7 @@ def test_current_factor_example_builds_without_execution():
     assert not hasattr(params, "return_periods")
     assert params.return_columns == ["P5L1", "P5L2", "P5L3"]
     assert params.return_specs == {
-        f"P5L{lag}": {"kind": "simple", "periods": 5, "lag": lag, "price_column": "open_hfq", "turnover_period": 5}
+        f"P5L{lag}": {"kind": "log", "periods": 5, "lag": lag, "price_column": "open_hfq", "turnover_period": 5}
         for lag in range(1, 4)
     }
     for settings in ({}, {"period": 1, "price_column": "open_hfq", "max_lag": 1}):
@@ -202,7 +221,7 @@ def test_current_factor_example_builds_without_execution():
         assert single_lag.max_lag == 1
         assert single_lag.return_columns == ["P1L1"]
         assert single_lag.return_specs == {
-            "P1L1": {"kind": "simple", "periods": 1, "lag": 1, "price_column": "open_hfq", "turnover_period": 1}
+            "P1L1": {"kind": "log", "periods": 1, "lag": 1, "price_column": "open_hfq", "turnover_period": 1}
         }
     assert parameter_type(namespace["Factor"]) is namespace["FactorParams"]
 

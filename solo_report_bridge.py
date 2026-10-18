@@ -78,13 +78,7 @@ def _manifest(report, *, theme, annual_trading_days, risk_free_rate):
             price_column = getattr(parameters, "price_column", None)
             if not isinstance(price_column, str) or price_column not in {"open", "close", "open_hfq", "close_hfq"}:
                 raise ValueError("price_column 必须为 open、close、open_hfq 或 close_hfq")
-            return_specs = {
-                f"P{period}L{lag}": {
-                    "kind": "simple", "periods": period, "lag": lag,
-                    "price_column": price_column, "turnover_period": period,
-                }
-                for lag in range(1, max_lag + 1)
-            }
+            return_specs = parameters.return_specs
         elif hasattr(parameters, "max_lag"):
             max_lag = _positive_integer(parameters.max_lag, "max_lag")
             return_specs = {}

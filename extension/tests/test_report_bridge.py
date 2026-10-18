@@ -15,7 +15,7 @@ spec.loader.exec_module(bridge)
 
 FORWARD_SPECS = {
     f"P5L{lag}": {
-        "kind": "simple", "periods": 5, "lag": lag,
+        "kind": "log", "periods": 5, "lag": lag,
         "price_column": "open_hfq", "turnover_period": 5,
     }
     for lag in range(1, 4)
@@ -40,11 +40,25 @@ def project(tmp_path, monkeypatch):
     return tmp_path, directory
 
 
+class ForwardParameters(SimpleNamespace):
+    return_kind = "log"
+
+    @property
+    def return_specs(self):
+        return {
+            f"P{self.period}L{lag}": {
+                "kind": self.return_kind, "periods": self.period, "lag": lag,
+                "price_column": self.price_column, "turnover_period": self.period,
+            }
+            for lag in range(1, self.max_lag + 1)
+        }
+
+
 def report(kind="factor"):
     names = ("information_coefficient", "group_returns") if kind == "factor" else (
         "daily_portfolios", "trade_details", "daily_positions", "daily_trading_statistics")
     result = SimpleNamespace(report_kind=kind, filenames={name: name + ".parquet" for name in names})
-    result.parameters = SimpleNamespace(
+    result.parameters = ForwardParameters(
         columns=["momentum"], period=5, price_column="open_hfq", max_lag=3, groups=5, n_select=10,
     )
     def save(output):
@@ -135,7 +149,7 @@ def test_forward_metadata_uses_holding_period_and_entry_lag(project, period, max
     metadata = json.loads((workspace / path).read_text(encoding="utf-8"))["parameters"]
     expected = {
         f"P{period}L{lag}": {
-            "kind": "simple", "periods": period, "lag": lag,
+            "kind": "log", "periods": period, "lag": lag,
             "price_column": price_column, "turnover_period": period,
         }
         for lag in range(1, max_lag + 1)
@@ -143,7 +157,19 @@ def test_forward_metadata_uses_holding_period_and_entry_lag(project, period, max
     assert metadata["return_columns"] == list(expected)
     assert metadata["return_specs"] == expected
     assert not hasattr(current.parameters, "return_columns")
-    assert not hasattr(current.parameters, "return_specs")
+    assert metadata["return_specs"] == current.parameters.return_specs
+
+
+@pytest.mark.parametrize("kind", ["simple", "log"])
+def test_forward_metadata_preserves_the_reports_actual_return_kind(project, kind):
+    workspace, _ = project
+    current = report()
+    current.parameters.return_kind = kind
+    value = bridge.report_iframe(current)
+    path = parse_qs(urlsplit(iframe_url(value)).query)["path"][0]
+    metadata = json.loads((workspace / path).read_text(encoding="utf-8"))["parameters"]
+    assert metadata["return_specs"] == current.parameters.return_specs
+    assert {item["kind"] for item in metadata["return_specs"].values()} == {kind}
 
 
 @pytest.mark.parametrize("period", [True, False, 0, -1, 1.0, 1.5, "5", None])

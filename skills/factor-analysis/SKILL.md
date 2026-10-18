@@ -21,12 +21,14 @@ description: 在 Solo 创建或修改因子研究、Factor/FactorParams/ReportFo
 
 ## 不可混用的口径
 
-- 新版Solo按 `k=1..max_lag` 输出 `P{period}L{k}(t)=price_column(t+k+period)/price_column(t+k)-1` 的simple收益，t+k按交易日计。`period=5, price_column="open_hfq", max_lag=3` 输出 `P5L1/P5L2/P5L3`，价格区间为 t+1→t+6、t+2→t+7、t+3→t+8。直接使用所选后复权或原始字段，不重复乘复权因子，不使用因子当日收盘价作起点。
-- 行情受 `[start,end]` 约束，包含end当天；尾部未来价格不足时对应列为NULL，不补0、不超界补行情，较早k仍可有效。`return_specs` 使用 `periods=period`、`lag=k`、`price_column`、`turnover_period=period`；持有期不是入场延迟。
+- 当前Solo所有因子收益均为log，按 `k=1..max_lag` 输出 `P{period}L{k}(t)=ln(price_column(t+k+period)/price_column(t+k))`，`lag=k>=1`，t+k按完整交易日轴计，不在稀疏因子面板上位移。`period=5, price_column="open_hfq", max_lag=3` 输出 `P5L1/P5L2/P5L3`，价格区间为 t+1→t+6、t+2→t+7、t+3→t+8。入场与退出使用同一价格字段，直接读取所选后复权或原始字段，不重复乘复权因子，不使用因子当日收盘价作起点；评价标签的log口径不要求修改compute动量因子公式。
+- 行情受 `[start,end]` 约束，包含end当天、不读取结束日后的未来区间；端点缺价或非正时对应列为NULL，不跳日期、不补0、不超界补行情，较早k仍可有效。`return_specs` 使用 `kind="log"`、`periods=period`、`lag=k`、`price_column`、`turnover_period=period`；持有期不是入场延迟。
 - 在 Factor 类上声明输出 columns，在 `compute` 的 return 前调用 `self.preprocess(frame)`；传 DosVar 时另给所属 session，不传 columns。因子可完全来自本地 DataFrame，不要求来自 query，也不预取中性化暴露。preprocess 始终另开自有（owned）query，按输入日期/证券读取动态 `industry_l0/circ_mv` 后 join 因子；内联 DOS 执行 3MAD、标准化、行业与 log 流通市值 OLS、残差再标准化，不依赖 `use factor`。借用的因子 session 不关闭，独立查询负责回收；分析器不重复预处理。保留行和 NULL，不把退化截面伪造为 0。
-- 多因子分析使用共同有效因子样本，不同分析列可能改变样本域；NULL标签仍不能用于相应IC/收益计算。
-- `period>1` 时逐日标签是重叠持有收益，不能直接连乘后称为可交易年化。旧版 `r0o/r1/r1o/r2` 保持单段隔夜/日内口径，`return_N` 保持原close-to-close累计收益定义；不转换或改写历史报告。
-- 相同因子名称不足以证明Solo/Arena结果可比。对齐收益价格/时点、simple或log、日期、成员、预处理、分组、权重和数据版本。
+- 多因子分析使用共同有效因子样本，不同分析列可能改变样本域；NULL标签仍不能用于相应IC/收益计算。各组raw收益是当日有效log标签的加权均值；IC/RankIC直接使用当日因子与原始log标签，不平滑。
+- 每个因子、收益列和分组独立计算 `effective(t)=mean(raw(t),...,raw(t-period+1))`，取当前及前 `period-1` 个交易期raw log收益的算术平均；开头不足period用已有样本，不额外除以period，不平均不同lag。先补齐完整交易日轴，缺失日期留NULL，window任一NULL则当期NULL；日期选择先用报告全表窗口再截取，`period=1`同一规则。
+- 分组净值为 `exp(cumsum(effective))`；多空先取同日 `high-low` raw log收益，再使用同一窗口及NULL规则。时序 `value=effective` 为log，`cumulative=cumsum(effective)` 为logsum。均值、年化、波动率与Sharpe使用同一有效序列的非NULL观测：均值为logmean，年化为 `logmean*252`，波动率为 `std(effective)*sqrt(252)`，零无风险利率下Sharpe为 `logmean/std(effective)*sqrt(252)`。所有period统一生成曲线与统计，NULL保留断点、不补零，不可定义的指标留NULL。
+- 旧版 `r0o/r1/r1o/r2` 保持单段隔夜/日内口径，`return_N` 保持原close-to-close累计收益定义；不转换或改写历史报告。
+- 相同因子名称不足以证明Solo/Arena结果可比。对齐收益价格/时点、log口径、日期、成员、预处理、分组、权重和数据版本；不把Solo规则改写为远端Arena契约。
 
 ## 交付
 
