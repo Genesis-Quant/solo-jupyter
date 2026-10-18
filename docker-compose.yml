@@ -33,6 +33,8 @@ services:
       NB_GID: "100"
       CHOWN_HOME: "yes"
       CHOWN_HOME_OPTS: "-R"
+      CHOWN_EXTRA: /shared/skills
+      CHOWN_EXTRA_OPTS: ""
       SOLO_SHARED_DIR: /home/jovyan/work
       SOLO_REPORT_FRONTEND_URL: ${SOLO_REPORT_FRONTEND_URL:-http://127.0.0.1:5174}
       JUPYTER_TOKEN: ${JUPYTER_TOKEN:?Set JUPYTER_TOKEN in .env}
@@ -49,6 +51,17 @@ services:
       - "127.0.0.1:8888:8888"
     volumes:
       - ./data:/home/jovyan/work
+      - type: volume
+        source: skills
+        target: /shared/skills
+        volume:
+          nocopy: true
+      - ./skills/backtest:/shared/skills/backtest
+      - ./skills/data-query:/shared/skills/data-query
+      - ./skills/dolphindb:/shared/skills/dolphindb
+      - ./skills/dsl:/shared/skills/dsl
+      - ./skills/factor-analysis:/shared/skills/factor-analysis
+      - ./codex/skills.json:/opt/jupyter-codex/skills.json:ro
       - ./config:/home/jovyan/.jupyter
       - ./keyring-data:/home/jovyan/.local/share/keyrings
       - codex-home:/home/jovyan/.codex
@@ -60,6 +73,7 @@ services:
 
 volumes:
   codex-home:
+  skills:
 
 networks:
   1panel-network:

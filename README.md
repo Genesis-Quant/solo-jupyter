@@ -114,6 +114,8 @@ docker compose restart
 `config/jupyter_server_config.json` 中启用了 `ResourceUseDisplay.track_cpu_percent=true`，
 顶部同时显示 Jupyter 服务及其子进程的 CPU 占用。修改此服务端选项后需重启 Jupyter。
 
+同一配置设置 `ResourceUseDisplay.enable_prometheus_metrics=false`，关闭插件的 Prometheus 指标采集。该任务每秒在服务主线程上逐个采样服务及全部子进程的 CPU，每个进程阻塞 0.05 秒；子进程（内核、终端、omp 等）越多，阻塞越久，终端输入和 Notebook 输出会周期性卡顿。顶部指示器使用的 `/api/metrics/v1` 在后台线程计算，不受影响。
+
 ## 单元格执行耗时
 
 镜像预置 `jupyterlab-execute-time==3.3.0`。刷新 JupyterLab 并运行 Notebook 单元格后，
@@ -239,7 +241,17 @@ Codex 的配置、登录信息和会话保存在 Docker 命名卷 `codex-home`�
 
 ### 内置研究 skills
 
-`codex/skills/` 随镜像安装到 `/etc/codex/skills/`，由 Codex 系统配置层发现（`admin` scope），不写入或覆盖持久化的 `~/.codex` 登录、配置、会话与用户 skills。不是把自定义内容放进会被 Codex 更新重建的 `~/.codex/skills/.system` 缓存。
+技能的实际目录是 `/shared/skills/`，不再创建 `/etc/codex/skills` 链接。Jupyter 的 Codex/ACP 读取 `/opt/jupyter-codex/skills.json`，通过原有 `skills/extraRoots/set` 调用注册搜索目录（`user` scope）；这是 Solo 的集成配置，不是 Codex `config.toml` 的字段。不改动用户登录、会话、sandbox 权限或 `CODEX_HOME`。
+
+仓库配置 `codex/skills.json`：
+
+```json
+{"extraRoots": ["/shared/skills"]}
+```
+
+`patch_codex_skills.py` 仅在已安装 ACP 的 `refreshSkills` 中加入该配置读取，与原有工作区技能根合并，不代理通信、不扩展可写工作区；上游刷新入口变化时构建明确失败。镜像安装时应用，手动 `npm install -g @agentclientprotocol/codex-acp@latest` 后需再运行 `python /opt/jupyter-codex/patch_skills.py`。
+
+`/shared/skills/` 本身是独立数据卷（主 Compose 为 `solo-skills`，独立 Compose 为 `skills`，设置 `nocopy`，不预填镜像内的预置技能）。自建技能直接在其中新建文件夹和 `SKILL.md`，保存在数据卷中，不进入仓库，重建容器后保留，`docker compose down -v` 会删除。5 个预置技能分别从 `jupyter/skills/<名称>/` 读写挂载到 `/shared/skills/<名称>/`，在 Jupyter 中修改会直接写回仓库；新增预置技能时需在两份 Compose 中各加一行挂载。`jupyter/codex/skills.json` 只读挂载到 `/opt/jupyter-codex/skills.json`，目录配置修改仓库中的 JSON。首次调整挂载需重建容器，之后技能内容与配置均在刷新技能时重新读取，无需重建镜像或重启内核。独立部署的文件浏览器根目录为 `/home/jovyan/work`，可通过终端编辑 `/shared/skills/`。
 
 | Skill | 用途 |
 | --- | --- |
@@ -251,15 +263,17 @@ Codex 的配置、登录信息和会话保存在 Docker 命名卷 `codex-home`�
 
 内容参考 Arena MCP 文档并按 Solo 实际接口适配。默认使用项目锁定的 Runtime JSON、`Universe.member` 和 Python Algo，不把 Arena 双源码、DolphinScript callbacks 或未连接的 MCP 工具当作本地接口。主指引按主题触发，详细契约在各 skill 的 `references/` 按需读取，不把整套文档自动塞入每轮上下文。
 
-在 Jupyter AI 的 Codex 聊天中可使用 `/skills` 查看技能，也可明确说“使用 `$dsl` 检查当前因子”或“使用 `$backtest` 检查回调”。ACP 会在新建/恢复会话以及处理普通提示前刷新 skills；如果界面仍保留旧列表，新开 Codex 聊天即可，不必重启 Notebook Kernel。
+在 Jupyter AI 的 Codex 聊天中可使用 `/skills` 查看技能，也可明确说“使用 `$dsl` 检查当前因子”或“使用 `$backtest` 检查回调”。ACP 会在新建/恢复会话以及处理普通提示前读取目录配置并刷新 skills；如果界面仍保留旧列表，新开 Codex 聊天即可，不必重启 Notebook Kernel。
+
+此配置仅接入 Jupyter 使用的 `codex-acp`，终端直接执行原生 `codex` 不会自动读取该 JSON。Codex 0.162.1 没有持久化的额外技能目录 TOML 字段；`skills.config.path` 仅控制已发现技能的启停，不能替代搜索目录注册。
 
 DSL skill 提供本地脚本，始终用研究项目的解释器运行：
 
 ```bash
-.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py version
-.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py operators --search pct_change
-.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py describe unary.pct_change
-.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py validate request.json
+.venv/bin/python /shared/skills/dsl/scripts/inspect_dsl.py version
+.venv/bin/python /shared/skills/dsl/scripts/inspect_dsl.py operators --search pct_change
+.venv/bin/python /shared/skills/dsl/scripts/inspect_dsl.py describe unary.pct_change
+.venv/bin/python /shared/skills/dsl/scripts/inspect_dsl.py validate request.json
 ```
 
 它读取已安装 Runtime 的注册表和 Pydantic 模型，校验依赖字段白名单，不连接数据库、不计算数据或安装依赖；不会加载 `.env`。字段目录和校验结果的 `configuration` 说明指数配置来源：显式 `--index-codes`（放在子命令前）优先于已导出的 `INDEX_CODES`，未提供时使用 Runtime 默认配置并警告。默认目录中的指数权重字段正常校验；默认配置不代表项目 `.env`，需要其它指数时显式传入非敏感配置。
@@ -267,8 +281,8 @@ DSL skill 提供本地脚本，始终用研究项目的解释器运行：
 项目若仅在 `.env` 中设置指数，用已确认的非敏感配置显式传入，不需要加载或导出密码。例如项目实际配置为 `123456.SH` 时：
 
 ```bash
-.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py --index-codes '123456.SH' factors
-.venv/bin/python /etc/codex/skills/dsl/scripts/inspect_dsl.py --index-codes '123456.SH' validate request.json
+.venv/bin/python /shared/skills/dsl/scripts/inspect_dsl.py --index-codes '123456.SH' factors
+.venv/bin/python /shared/skills/dsl/scripts/inspect_dsl.py --index-codes '123456.SH' validate request.json
 ```
 
 参数必须与运行项目的有效配置一致，不应仅为通过校验添加请求中的指数；空字符串表示明确没有配置指数。helper 按 Runtime 的映射函数更新权重字段，其余基础字段和算符仍来自已安装版本。算符通用 JSON Schema 不包含所有具体规则，实际验证使用 `FactorQuery.model_validate`。本地校验通过不等于数据完整或回测成功。
@@ -281,7 +295,7 @@ python -m pytest -q -p no:cacheprovider tests/test_codex_skills.py tests/test_co
 python /opt/jupyter-codex/check_skills.py --cwd /shared/projects
 ```
 
-DSL 测试需要已安装 `arena-runtime` 的项目 Python；没有该包时相关用例明确跳过。发现检查只调用 Codex 本地 `initialize` 和 `skills/list`，使用临时 `HOME/CODEX_HOME`，不发送模型请求、不读取真实登录或聊天记录。要证明无外部网络，放在 `docker run --network none` 的隔离容器执行；临时目录不等于网络隔离。
+DSL 测试需要已安装 `arena-runtime` 的项目 Python；没有该包时相关用例明确跳过。发现检查只调用 Codex 本地 `initialize`、`skills/extraRoots/set` 和 `skills/list`，使用临时 `HOME/CODEX_HOME`，不发送模型请求、不读取真实登录或聊天记录。要证明无外部网络，放在 `docker run --network none` 的隔离容器执行；临时目录不等于网络隔离。
 
 ## Python 代码检查
 

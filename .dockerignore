@@ -8,9 +8,11 @@
 !scripts/
 !scripts/patch_mcp_uuid.py
 !scripts/check_codex_skills.py
+!scripts/patch_codex_skills.py
 !codex/
-!codex/skills/
-!codex/skills/**
+!codex/skills.json
+!skills/
+!skills/**
 !extension/
 extension/*
 !extension/package.json

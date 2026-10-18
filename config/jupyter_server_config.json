@@ -22,6 +22,7 @@
     "default_persona_id": "jupyter-ai-personas::jupyter_ai_acp_client::CodexAcpPersona"
   },
   "ResourceUseDisplay": {
-    "track_cpu_percent": true
+    "track_cpu_percent": true,
+    "enable_prometheus_metrics": false
   }
 }

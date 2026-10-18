@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 HELPER_PATH = (
-    Path(__file__).resolve().parents[1] / "codex/skills/dsl/scripts/inspect_dsl.py"
+    Path(__file__).resolve().parents[1] / "skills/dsl/scripts/inspect_dsl.py"
 )
 spec = importlib.util.spec_from_file_location("solo_inspect_dsl", HELPER_PATH)
 helper = importlib.util.module_from_spec(spec)

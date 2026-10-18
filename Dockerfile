@@ -103,6 +103,11 @@ RUN python -m pip install --no-cache-dir --index-url https://pypi.tuna.tsinghua.
 
 COPY uv.toml /etc/uv/uv.toml
 COPY solo_report_bridge.py /etc/ipython/solo_report_bridge.py
-COPY codex/skills/ /etc/codex/skills/
+USER root
+COPY --chown=${NB_UID}:${NB_GID} skills/ /shared/skills/
+COPY codex/skills.json /opt/jupyter-codex/skills.json
+COPY scripts/patch_codex_skills.py /opt/jupyter-codex/patch_skills.py
+RUN python -B /opt/jupyter-codex/patch_skills.py
+USER ${NB_UID}
 COPY scripts/check_codex_skills.py /opt/jupyter-codex/check_skills.py
 RUN python -B /opt/jupyter-codex/check_skills.py --cwd /tmp

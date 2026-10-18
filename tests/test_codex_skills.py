@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILLS = ROOT / "codex/skills"
+SKILLS = ROOT / "skills"
 NAMES = {"dsl", "dolphindb", "data-query", "factor-analysis", "backtest"}
 spec = importlib.util.spec_from_file_location("check_codex_skills", ROOT / "scripts/check_codex_skills.py")
 check = importlib.util.module_from_spec(spec)
@@ -52,23 +52,53 @@ def test_python_and_json_examples_parse():
 def test_image_includes_skills_outside_persistent_codex_home():
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     ignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
-    assert "COPY codex/skills/ /etc/codex/skills/" in dockerfile
-    assert "!codex/skills/" in ignore.splitlines()
-    assert "!codex/skills/**" in ignore.splitlines()
+    assert "COPY --chown=${NB_UID}:${NB_GID} skills/ /shared/skills/" in dockerfile
+    assert "ln -s /shared/skills /etc/codex/skills" not in dockerfile
+    assert "COPY codex/skills.json /opt/jupyter-codex/skills.json" in dockerfile
+    assert "COPY scripts/patch_codex_skills.py /opt/jupyter-codex/patch_skills.py" in dockerfile
+    assert "RUN python -B /opt/jupyter-codex/patch_skills.py" in dockerfile
+    assert "!codex/skills.json" in ignore.splitlines()
+    assert "!scripts/patch_codex_skills.py" in ignore.splitlines()
+    assert "!skills/" in ignore.splitlines()
+    assert "!skills/**" in ignore.splitlines()
     assert "COPY scripts/check_codex_skills.py /opt/jupyter-codex/check_skills.py" in dockerfile
     assert "RUN python -B /opt/jupyter-codex/check_skills.py --cwd /tmp" in dockerfile
     assert not re.search(r"COPY[^\n]*skills[^\n]*/\.codex/", dockerfile)
     assert "**/__pycache__/" in ignore
 
 
+def test_compose_maps_each_preset_skill_over_a_separate_skill_volume():
+    composes = {"./": ("skills", (ROOT / "docker-compose.yml").read_text(encoding="utf-8"))}
+    parent = ROOT.parent / "docker-compose.yml"
+    if parent.is_file():
+        composes["./jupyter/"] = ("solo-skills", parent.read_text(encoding="utf-8"))
+    for prefix, (volume, compose) in composes.items():
+        assert (
+            f"- type: volume\n        source: {volume}\n        target: /shared/skills\n"
+            "        volume:\n          nocopy: true\n"
+        ) in compose
+        for name in NAMES:
+            assert f"- {prefix}skills/{name}:/shared/skills/{name}\n" in compose
+        assert f"- {prefix}codex/skills.json:/opt/jupyter-codex/skills.json:ro" in compose
+    assert json.loads((ROOT / "codex/skills.json").read_text()) == {"extraRoots": ["/shared/skills"]}
+    source = (ROOT / "scripts/check_codex_skills.py").read_text(encoding="utf-8")
+    assert 'default=Path("/shared/skills")' in source
+
+
+def test_standalone_compose_chowns_only_the_skill_volume_root():
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "      CHOWN_EXTRA: /shared/skills\n" in compose
+    assert '      CHOWN_EXTRA_OPTS: ""\n' in compose
+
+
 def discovery_response(root):
     return {"data": [{"cwd": "/shared/projects", "errors": [], "skills": [
-        {"name": name, "path": str(root / name / "SKILL.md"), "scope": "admin", "enabled": True}
+        {"name": name, "path": str(root / name / "SKILL.md"), "scope": "user", "enabled": True}
         for name in sorted(NAMES)
     ]}]}
 
 
-def test_discovery_accepts_all_five_enabled_system_skills(tmp_path):
+def test_discovery_accepts_all_five_enabled_configured_skills(tmp_path):
     result = check.verify_response(discovery_response(tmp_path), tmp_path)
     assert {s["name"] for s in result} == NAMES
 
@@ -86,7 +116,7 @@ def test_discovery_rejects_partial_or_shadowed_installation(tmp_path, fault):
     elif fault == "shadowed":
         entry["skills"][0]["path"] = str(tmp_path / "user/SKILL.md")
     elif fault == "scope":
-        entry["skills"][0]["scope"] = "user"
+        entry["skills"][0]["scope"] = "admin"
     elif fault == "duplicate":
         entry["skills"].append(entry["skills"][0].copy())
     else:
@@ -98,6 +128,8 @@ def test_discovery_rejects_partial_or_shadowed_installation(tmp_path, fault):
 def test_discovery_does_not_start_model_turns():
     source = (ROOT / "scripts/check_codex_skills.py").read_text(encoding="utf-8")
     assert '"skills/list"' in source
+    assert '"skills/extraRoots/set"' in source
+    assert source.index('"skills/extraRoots/set"') < source.index('"skills/list"', source.index('"skills/extraRoots/set"'))
     assert '"initialize"' in source
     assert '"turn/start"' not in source
     assert '"thread/start"' not in source

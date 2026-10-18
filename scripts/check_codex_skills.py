@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 EXPECTED = frozenset({"dsl", "dolphindb", "data-query", "factor-analysis", "backtest"})
+CONFIG = Path("/opt/jupyter-codex/skills.json")
 
 
 def verify_response(response, skills_root):
@@ -25,10 +26,10 @@ def verify_response(response, skills_root):
         if name in found:
             raise ValueError(f"Duplicate research skill: {name}")
         expected_path = skills_root / name / "SKILL.md"
-        if Path(skill["path"]) != expected_path:
+        if Path(skill["path"]).resolve() != expected_path.resolve():
             raise ValueError(f"{name} was loaded from an unexpected location: {skill['path']}")
-        if skill.get("scope") != "admin" or skill.get("enabled") is not True:
-            raise ValueError(f"{name} is not an enabled system skill")
+        if skill.get("scope") != "user" or skill.get("enabled") is not True:
+            raise ValueError(f"{name} is not an enabled configured skill")
         found[name] = {key: skill[key] for key in ("name", "path", "scope", "enabled")}
     missing = EXPECTED - found.keys()
     if missing:
@@ -36,7 +37,7 @@ def verify_response(response, skills_root):
     return [found[name] for name in sorted(found)]
 
 
-async def discover(cwd, skills_root, timeout):
+async def discover(cwd, skills_root, timeout, extra_roots):
     with tempfile.TemporaryDirectory(prefix="solo-codex-skills-") as temporary:
         home = Path(temporary) / "home"
         codex_home = home / ".codex"
@@ -74,10 +75,14 @@ async def discover(cwd, skills_root, timeout):
                 }})
                 await receive(1)
                 await send({"method": "initialized", "params": {}})
-                await send({"id": 2, "method": "skills/list", "params": {
+                await send({"id": 2, "method": "skills/extraRoots/set", "params": {
+                    "extraRoots": extra_roots,
+                }})
+                await receive(2)
+                await send({"id": 3, "method": "skills/list", "params": {
                     "cwds": [str(cwd)], "forceReload": True,
                 }})
-                return verify_response(await receive(2), skills_root)
+                return verify_response(await receive(3), skills_root)
         finally:
             if process.returncode is None:
                 process.terminate()
@@ -91,7 +96,8 @@ async def discover(cwd, skills_root, timeout):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
-    parser.add_argument("--skills-root", type=Path, default=Path("/etc/codex/skills"))
+    parser.add_argument("--skills-root", type=Path, default=Path("/shared/skills"))
+    parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--timeout", type=float, default=30)
     args = parser.parse_args()
     if args.timeout <= 0:
@@ -99,7 +105,8 @@ def main():
     cwd = args.cwd.resolve()
     if not cwd.is_dir():
         parser.error("--cwd must be an existing directory")
-    result = asyncio.run(discover(cwd, args.skills_root.resolve(), args.timeout))
+    extra_roots = json.loads(args.config.read_text(encoding="utf-8"))["extraRoots"]
+    result = asyncio.run(discover(cwd, args.skills_root.resolve(), args.timeout, extra_roots))
     print(json.dumps({"success": True, "skills": result}, ensure_ascii=False, indent=2))
 
 
