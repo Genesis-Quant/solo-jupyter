@@ -73,7 +73,7 @@ preprocess 始终另开自有（owned）query，按输入日期与证券获取�
 from scheme import StockPool
 
 form = FactorReportForm(
-    start="2024-06-03", end="2024-06-08",
+    start="2024-06-03", end="2024-06-28",
     pool=StockPool.SSE50,
     periods=20,
     period=5, price_column="open_hfq", max_lag=3,
@@ -82,6 +82,8 @@ form = FactorReportForm(
 params = form.build()
 report = params.run(Factor)
 ```
+
+示例至少需 `period+max_lag+1` 个真实交易日才能在端点价格有效时生成最大lag的首个标签（此处为9日）；该区间扣除2024-06-10端午休市仍有19个交易日。lookback仅补因子历史，不补研究end后的未来报价。
 
 只有用户请求实际运行时才执行最后一行。在Solo启动的Notebook里 `report.show()` 通过桥接保存并展示；不在普通Python脚本中假装存在该桥接。仅导出Parquet时，`report.save(output)` 会创建目录但也可覆盖同名文件，因此使用事先确认不存在的新输出目录。
 

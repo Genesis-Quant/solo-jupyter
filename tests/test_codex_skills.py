@@ -2,6 +2,7 @@ import ast
 import importlib.util
 import json
 import re
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -186,6 +187,46 @@ def test_factor_skill_examples_use_forward_periods_and_document_trading_day_boun
         assert field in contract
 
 
+def test_current_factor_doc_example_has_enough_real_trading_days():
+    path = SKILLS / "factor-analysis/references/factor-contract.md"
+    text = path.read_text(encoding="utf-8")
+    blocks = re.findall(r"^```python\s*\n(.*?)^```", text, re.M | re.S)
+    example = ast.parse(blocks[1], filename=str(path))
+    form = next(node for node in ast.walk(example) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == "FactorReportForm")
+    settings = {node.arg: ast.literal_eval(node.value) for node in form.keywords
+                if node.arg in {"start", "end", "period", "max_lag"}}
+    assert settings == {"start": "2024-06-03", "end": "2024-06-28", "period": 5, "max_lag": 3}
+    # 沪深交易日 fixture；2024-06-10 端午休市，不能用普通工作日历替代。
+    trading_days = [date.fromisoformat(day) for day in (
+        "2024-06-03 2024-06-04 2024-06-05 2024-06-06 2024-06-07 "
+        "2024-06-11 2024-06-12 2024-06-13 2024-06-14 "
+        "2024-06-17 2024-06-18 2024-06-19 2024-06-20 2024-06-21 "
+        "2024-06-24 2024-06-25 2024-06-26 2024-06-27 2024-06-28"
+    ).split()]
+    start, end = date.fromisoformat(settings["start"]), date.fromisoformat(settings["end"])
+    actual_days = [day for day in trading_days if start <= day <= end]
+    assert date(2024, 6, 10) not in actual_days
+    assert len(actual_days) == 19
+    assert len(actual_days) >= settings["period"] + settings["max_lag"] + 1
+    assert "period+max_lag+1" in text
+    assert "lookback仅补因子历史，不补研究end后的未来报价" in text
+
+
+def test_frontend_factor_manifest_example_matches_log_return_contract():
+    path = ROOT.parent / "frontend/README.md"
+    if not path.is_file():
+        pytest.skip("独立 Jupyter 仓库不包含 frontend README 示例")
+    blocks = re.findall(r"^```json\s*\n(.*?)^```", path.read_text(encoding="utf-8"), re.M | re.S)
+    manifest = next(item for item in map(json.loads, blocks) if item.get("format") == "solo-notebook-report")
+    assert manifest["schemeVersion"] == "1.10.0"
+    assert manifest["parameters"]["return_columns"] == ["P5L1", "P5L2", "P5L3"]
+    assert manifest["parameters"]["return_specs"] == {
+        f"P5L{lag}": {"kind": "log", "periods": 5, "lag": lag, "price_column": "open_hfq", "turnover_period": 5}
+        for lag in range(1, 4)
+    }
+
+
 def test_current_factor_example_builds_without_execution():
     pytest.importorskip("scheme")
     path = SKILLS / "factor-analysis/references/factor-contract.md"
@@ -200,6 +241,8 @@ def test_current_factor_example_builds_without_execution():
     example.body.pop()  # 仅构建示例参数，不执行研究或连接数据库。
     exec(compile(example, str(path), "exec"), namespace)
     params = namespace["params"]
+    assert params.start == date(2024, 6, 3)
+    assert params.end == date(2024, 6, 28)
     assert params.periods == 20
     assert params.universe.pool == StockPool.SSE50
     assert params.period == 5
