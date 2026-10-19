@@ -47,17 +47,19 @@ Factor 类唯一声明输出 `columns`，Form 不提供输入、AnalysisParams �
 7. 相同数据版本和供应商历史修订；point-in-time归档是否存在。
 8. 各结果表的键、日期轴、NULL掩码和数值容差，不只比较一个汇总指标。
 
-Solo 每进程首次 `codes=[]` 的证券域来自 CoreData 全历史所有记录的 distinct codes tuple，后续复用、不按日期或 `close` 缩小，显式代码不改；`evaluate` 保留交易日×固定代码域的 BOOL 面板，无成分为 False。执行统计的初始代码数可能因两端数据域定义不同而不同；应区分初始覆盖数和最终有效样本，而非改统计数掩盖差异。
+Solo `codes=[]` 的证券域直接复用 Arena Runtime 从 Tushare `stock_basic` 的 `L/D/P` 股票合并得到的进程缓存，需要 `TUSHARE_TOKEN`；不扫描 CoreData，不按日期或 `close` 缩小，显式代码不改且不调用 Tushare；`evaluate` 保留交易日×固定代码域的 BOOL 面板，无成分为 False。执行统计的初始代码数可能因两端数据域定义不同而不同；应区分初始覆盖数和最终有效样本，而非改统计数掩盖差异。
 
 ## 指标解释
 
-- IC是当日因子与原始未来log标签的相关；RankIC使用排序相关，两者不平滑，具体ties/缺失规则核对当前实现。ICIR按当前模块定义的均值/样本标准差，不无依据乘 `sqrt(252)`。
-- 各组raw收益仍为当日有效log标签的加权均值。报告对每个因子、收益列和分组计算 `effective(t)=mean(raw(t),...,raw(t-period+1))`，取当前及前 `period-1` 个交易期raw log收益的算术平均；开头不足period时使用已有样本，不额外除以period，不平均不同lag。
-- 先补齐完整交易日轴，缺失日期留NULL；window中任一raw为NULL则当期effective为NULL，不跳过NULL求均值。日期选择先在报告全表计算窗口再截取，不在所选起点重启；`period=1`使用同一规则。
-- 分组净值为 `exp(cumsum(effective))`。多空先取同日 `high-low` raw log收益，再使用同一窗口及NULL规则；时序 `value=effective` 为log，`cumulative=cumsum(effective)` 为logsum，不是简单收益或净值。所有持有期统一生成曲线与统计，NULL日期保留断点、不补零。
-- 均值、年化、波动率与Sharpe使用同一有效序列的非NULL观测：均值为logmean，年化为 `logmean*252`，波动率为 `std(effective)*sqrt(252)`，零无风险利率下Sharpe为 `logmean/std(effective)*sqrt(252)`。报告统计不等同于真实成交组合收益，费用与冲击需另做交易模拟。
+- IC 是当日因子与原始未来 log 标签的相关；RankIC 使用排序相关，两者不平滑，具体 ties/缺失规则核对当前实现。ICIR 按当前模块定义的均值/样本标准差，不无依据乘 `sqrt(252)`。原始日频标签、换手的原 period 和未来端点公式不变，不把信号因子 momentum 改为 log。
+- 各组 raw 收益仍为当日有效 log 标签的加权均值。令 `P=period`，以 full report 的完整交易日轴首日为固定 anchor，每个因子、收益列和分组独立按连续 P 个真实交易日切成不相交集合，每集合恰有 P 条 raw P 日标签。集合 `collectionlog(C)=sum(rawlog[i] for i in C)/P` 是算术平均，只做一次 `/P`，不是 mean 后再除以 P；对应 simple 集合为 `collection_simple(C)=prod(1+R[i] for i in C)**(1/P)-1`，即增长因子的几何平均减一。不使用逐日 rolling average 或 expanding prefix，不平均不同 lag。
+- 只有完整 P 日期集合输出一个点，`time` 为集合末日的原观测日期；开头 P-1 个交易日没有集合点，尾部不足 P 个交易日不输出。先按完整真实交易日历补齐缺交易行并填 NULL，任一 raw 为 NULL 则整个集合为 NULL，在集合末日保留断点，不跳过 NULL 凑 P。日期选择先在 full report 全表固定集合后，再按集合末日筛选，不按所选起点重切集合或改变 anchor；`period=1` 使用同一规则。
+- 历史 simple 展示时先转 `ln(1+r)`，`r<=-1` 或非有限值转 NULL；旧 simple 多期数据使用 `group_turnover` 的完整日历补 NULL，缺少时明确报“缺少完整交易日历”，不按已有行压缩；新版 log 的 `group_returns` 已含完整日历，没有 `group_turnover` 仍支持。保留原 metadata，不改写历史文件。
+- 分组净值为 `exp(cumsum(collectionlog))`，正序/倒序都沿同一集合序列每集合只累计一次。多空取同集合 top-bottom（`high-low`）的集合 log 收益之差；时序 `value=collectionlog` 为 log，`cumulative=cumsum(collectionlog)` 为 logsum，不是简单收益或净值。所有持有期统一生成曲线与统计，NULL 保留断点、不补零。
+- 分组均值、t 检验/p 值、年化、波动率与 Sharpe 都基于非 NULL 完整集合，每集合为一次 observation，不把 P 条 raw 当 P 次样本；年化频率为 `252/P`，均值为 logmean，年化为 `logmean*252/P`，波动率为 `std(collectionlog)*sqrt(252/P)`，零无风险利率下 Sharpe 为 `logmean/std(collectionlog)*sqrt(252/P)`。报告统计不等同于真实成交组合收益，费用与冲击需另做交易模拟。
+- 例如 P20 的 20 条 raw 都对应 10% 的 20 日收益，只输出一个收益 10%、NAV 1.1 的集合点；40 条只输出两个点，NAV 为 1.1、1.21，绝不是 `1.1^40`，不能将同一段持有收益逐日重复累计。
 - 分组/集合换手衡量样本集合变化，不自动等于真实成交额换手；历史标签按原始规格解释。
-- 小样本、零方差、空截面导致的NULL应披露，不转换成看似良好的0风险指标。
+- 小样本、零方差、空截面导致的 NULL 应披露，不转换成看似良好的 0 风险指标。
 
 ## 远端 Arena
 

@@ -51,7 +51,7 @@ assert request.filters == []
 assert Universe.member in request.derivatives
 ```
 
-此处 `end_date` 在版本基线中是字符串。`dataset_query` 只构造已注入成员节点的完整请求，不连接数据库；它保留 `codes=[]`，可在确认运行范围后直接交给 `scheme.data.query(request)` 执行，不需要补入候选代码。`scheme.data.query` 是本地直接执行包装，不是 Runtime `execute_query` 的别名：每进程首次空 `codes` 从 CoreData 全历史所有记录读取 distinct codes 并缓存为 tuple，不按日期、lookback 或 `close` 取代码；后续空列表复用，显式 `codes` 原样保留，导入不联网。证券域不依赖 `close`，但每次查询的日期轴仍取区间内真实 `close` 交易日。
+此处 `end_date` 在版本基线中是字符串。`dataset_query` 只构造已注入成员节点的完整请求，不连接数据库；它保留 `codes=[]`，可在确认运行范围后直接交给 `scheme.data.query(request)` 执行，不需要补入候选代码。`scheme.data.query` 是本地直接执行包装，不是 Runtime `execute_query` 的别名：空 `codes` 复用 Arena Runtime 的 `get_codes()`，首次通过 Tushare `stock_basic` 合并 `L/D/P` 股票并在进程内缓存，需要 `TUSHARE_TOKEN`；不扫描 CoreData，不按日期、lookback 或 `close` 缩小代码域。显式 `codes` 原样保留且不调用 Tushare，导入不联网。证券域不依赖 `close`，但每次查询的日期轴仍取区间内真实 `close` 交易日。
 
 ### 用 Universe.query 执行同一请求
 
@@ -75,7 +75,7 @@ def query_small_index_window():
 
 ## 已有环境凭据与关闭 session
 
-当前 Scheme 使用 `DOLPHIN_HOST`、`DOLPHIN_PORT`、`DOLPHIN_RUNTIME_USERNAME`、`DOLPHIN_RUNTIME_PASSWORD`，以及可选的数据库/表配置。只复用现有环境，不打印这些值；缺失时只报告缺失变量名。`scheme.data.query` 的连接由安装的 Runtime 配置负责，不把下面的 settings 参数硬塞给它。
+当前 Scheme 查询使用 `SOLO_DOLPHIN_HOST/PORT/USERNAME/PASSWORD`，回测引擎使用 `BACKTEST_DOLPHIN_HOST/PORT/USERNAME/PASSWORD`；`codes=[]` 另需 `TUSHARE_TOKEN` 获取 `stock_basic` 股票列表。只复用现有环境，不打印凭据，缺失时只报告变量名，不回退旧变量或另一套连接。`scheme.data.query(request, settings=...)` 可显式指定数据连接，省略时读取 SOLO 配置。
 
 以下示例会连接服务，只有用户任务确实需要时才运行；只取所需元数据，不下载整个 defs 列表。
 

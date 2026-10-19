@@ -58,7 +58,7 @@ description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到
 - JSON 中字符串可以引用基础列或命名派生列；Arena Python 源码对本地派生列必须引用 OP 变量。
 - Solo 的 `Universe.member` 是 `"stock_pool_member"`；`dataset_query` 注入它并保留 `codes=[]`，`Universe.query` 只执行这一次查询，不做本地 `codes_query` 预选，也不自动加入 `filters`。不要自行重定义；已构造对象可直接交给 `scheme.data.query` 执行。
 - Runtime Query 的 `end_date` 包含该日；Solo `Universe.query(start, end)` 和策略研究参数是 `[start, end)`，新版因子计算/分析为 `[start,end]`，调用 Universe 时加一天。
-- 本地 `codes=[]` 表示使用进程固定全市场证券域，不表示空股票池；每进程首次从 CoreData 全历史所有记录取 distinct codes 缓存为 tuple，后续复用，不依赖请求日期或 `close`，显式 `codes` 不改。`evaluate` 返回交易日×固定证券域 BOOL 面板，无成分日为全 False、不因缺行情缩列；日期轴仍按真实 `close` 交易日确定。空候选不能直接当空列表查询。
+- 本地 `codes=[]` 表示使用进程固定全市场证券域，不表示空股票池；通过 Arena Runtime `get_codes()` 从 Tushare `stock_basic` 合并 `L/D/P` 股票、去重排序并在进程内缓存，需要 `TUSHARE_TOKEN`；不扫描 CoreData，不依赖请求日期或 `close`，显式 `codes` 不改且不调用 Tushare。`evaluate` 返回交易日×固定证券域 BOOL 面板，无成分日为全 False、不因缺行情缩列；日期轴仍按真实 `close` 交易日确定。空候选不能直接当空列表查询。
 - `lookback` 是日历时长，不是交易日数；负 shift 和未来标签只能用于评价，不能作为交易信号。
 - 截面计算必须保留完整参与域。只查最终入选股票不能复现原排名或标准化结果。
 

@@ -44,7 +44,7 @@
 
 Runtime `start_date..end_date` 为闭区间，`lookback` 只扩展内部历史，最终输出仍截回请求区间。`P90D` 是90个日历日，不保证90条交易记录，停牌、上市时间和缺行情需另查。
 
-Solo `Universe.query(start, end)` 采用结束日不含，并在内部转成 Runtime `end_date=end-1日`。`scheme.data.query` 是本地直接执行包装，不是 Runtime `execute_query` 的 alias；每进程首次 `codes=[]` 从 CoreData 全历史所有记录读取 distinct codes 缓存为 tuple，不按请求日期、lookback 或 `close` 筛代码，之后空列表复用，显式 `codes` 不改。指数池单次执行 `dataset_query`（保留 `codes=[]` 并注入 `Universe.member`），不做 `codes_query` 预选；已构造对象也可直接交给 `scheme.data.query` 执行，是否删非成员行由调用者决定。`evaluate` 返回交易日×固定证券域 BOOL 面板，无成分日为全 False，不因缺行情缩列；日期轴仍来自区间内真实 `close` 交易日。不要用过滤后的少量证券重新定义原 CS 截面。
+Solo `Universe.query(start, end)` 采用结束日不含，并在内部转成 Runtime `end_date=end-1日`。`scheme.data.query` 是本地直接执行包装，不是 Runtime `execute_query` 的 alias；`codes=[]` 复用 Arena Runtime `get_codes()`，首次从 Tushare `stock_basic` 合并 `L/D/P` 股票、去重排序并在进程内缓存，需要 `TUSHARE_TOKEN`；不扫描 CoreData，不按请求日期、lookback 或 `close` 筛代码，显式 `codes` 不改且不调用 Tushare。指数池单次执行 `dataset_query`（保留 `codes=[]` 并注入 `Universe.member`），不做 `codes_query` 预选；已构造对象也可直接交给 `scheme.data.query` 执行，是否删非成员行由调用者决定。`evaluate` 返回交易日×固定证券域 BOOL 面板，无成分日为全 False，不因缺行情缩列；日期轴仍来自区间内真实 `close` 交易日。不要用过滤后的少量证券重新定义原 CS 截面。
 
 `codes=[]` 请求全市场计算域，不能作为空池“跳过查询”的方式。证券是否有数据和市场后缀支持应查当前源数据，不把 `.SH/.SZ` 与 `.XSHG/.XSHE` 混写。
 

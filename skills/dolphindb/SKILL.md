@@ -32,7 +32,7 @@ description: 在 Solo/Jupyter 中编写与诊断 DolphinDB、DolphinScript/DOS�
 
 ## 与查询 API 的关键边界
 
-- `scheme.data.query` 是接收 Runtime `FactorQuery` 或字典的本地直接执行包装，不是 `runtime.apps.query.execute_query` 的别名，也不是 Arena Backend 双源码请求。每进程首次 `codes=[]` 从 CoreData 全历史所有记录读取 distinct codes 并缓存为 tuple；后续空列表复用，不按查询日期或 `close` 取证券，显式 `codes` 原样保留，导入不连接数据库。
+- `scheme.data.query` 是接收 Runtime `FactorQuery` 或字典的本地直接执行包装，不是 `runtime.apps.query.execute_query` 的别名，也不是 Arena Backend 双源码请求。`codes=[]` 复用 Arena Runtime 的 `get_codes()`，首次从 Tushare `stock_basic` 合并 `L/D/P`（上市、退市、暂停上市）股票、去重排序并在进程内缓存；需要 `TUSHARE_TOKEN`，不扫描 CoreData，也不按查询日期或 `close` 缩小证券域。显式 `codes` 原样保留且不调用 Tushare，导入不联网。
 - `Universe.query(start, end, ...)` 使用 `[start, end)`，内部转为 inclusive `end - 1 天`；不要再减一次。它单次执行已注入成员节点、`codes=[]` 的 `dataset_query`，不再执行本地 `codes_query` 预选；该对象也可交给 `scheme.data.query` 执行。
 - `Universe.member` 是注入的逐日 BOOL 节点，不默认加入 `filters`。固定证券域不等于每日成员集合；`evaluate` 返回交易日×固定证券域的 BOOL 面板，当日无成分则整行 False，不因缺行情缩列。日期轴仍按区间内真实 `close` 交易日确定，与代码域缓存分开。
 - DSL 元数据统一使用 `../dsl/scripts/inspect_dsl.py`，提供离线 factors/operators/describe/query validation，不联网；运行前用项目解释器查看 `--help` 核对参数，不把它当数据执行器。

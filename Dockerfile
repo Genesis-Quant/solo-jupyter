@@ -40,11 +40,22 @@ RUN npm run build -- --core-package-file "$(python -c 'from pathlib import Path;
     && python -m pip wheel --no-cache-dir --no-deps --index-url https://pypi.tuna.tsinghua.edu.cn/simple --wheel-dir /tmp/solo-wheel .
 
 FROM notebook-node
+# HOME is inherited from the notebook image; keep shared runtime defaults here.
+ENV JUPYTER_PATH=/home/jovyan/.jupyter \
+    JP_LSP_VIRTUAL_DIR=/home/jovyan/.virtual_documents \
+    UV_PYTHON_INSTALL_DIR=/home/jovyan/.python \
+    UV_LINK_MODE=hardlink \
+    UV_CACHE_DIR=/shared/projects/.uv-cache \
+    SOLO_SHARED_DIR=/shared \
+    SOLO_BACKEND_URL=http://backend:8000
 USER root
 RUN rm -f /usr/local/bin/codex /usr/local/bin/codex-acp \
     && npm install --global --no-audit --no-fund \
         @openai/codex@latest \
         @agentclientprotocol/codex-acp@latest \
+        @oh-my-pi/pi-coding-agent@18.11.2 \
+        @earendil-works/pi-coding-agent@1.2.0 \
+        bun@1.4.3 \
     && install -d -o "${NB_UID}" -g "${NB_GID}" -m 700 "/home/${NB_USER}/.codex" \
     && node --version && npm --version && npx --version \
     && codex --version && codex-acp --version
@@ -111,3 +122,8 @@ RUN python -B /opt/jupyter-codex/patch_skills.py
 USER ${NB_UID}
 COPY scripts/check_codex_skills.py /opt/jupyter-codex/check_skills.py
 RUN python -B /opt/jupyter-codex/check_skills.py --cwd /tmp
+
+# Keep preinstalled tools in the image; persist subsequent user installs in HOME.
+ENV npm_config_prefix=/home/jovyan/.local \
+    BUN_INSTALL=/home/jovyan/.bun \
+    PATH="/home/jovyan/.local/bin:/home/jovyan/.bun/bin:${PATH}"

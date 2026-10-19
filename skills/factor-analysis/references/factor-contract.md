@@ -83,7 +83,7 @@ params = form.build()
 report = params.run(Factor)
 ```
 
-示例至少需 `period+max_lag+1` 个真实交易日才能在端点价格有效时生成最大lag的首个标签（此处为9日）；该区间扣除2024-06-10端午休市仍有19个交易日。lookback仅补因子历史，不补研究end后的未来报价。
+示例至少需 `period+max_lag+1` 个真实交易日才能在端点价格有效时生成最大lag的首个标签（此处为9日）；该区间扣除2024-06-10端午休市仍有19个交易日，足够按报告首日固定锚点划出3个完整 P5 日期集合（末日分别为2024-06-07、2024-06-17、2024-06-24），尾部4日不输出。完整日期集合不代表标签全部有效：受未来端点限制，集合内任一标签NULL时该集合收益仍为NULL。lookback仅补因子历史，不补研究end后的未来报价。
 
 只有用户请求实际运行时才执行最后一行。在Solo启动的Notebook里 `report.show()` 通过桥接保存并展示；不在普通Python脚本中假装存在该桥接。仅导出Parquet时，`report.save(output)` 会创建目录但也可覆盖同名文件，因此使用事先确认不存在的新输出目录。
 
@@ -103,21 +103,24 @@ P{period}L{k}(t) = ln(price_column(t+k+period) / price_column(t+k))
 
 桥接校验完整 `period/price_column/max_lag` 后，直接使用报告参数的 `return_specs`，不凭参数形状强制改写收益类型。Scheme 1.10 起生成log标签，1.8/1.9的simple结果保留其实际规格。旧版仅有 `max_lag` 的对象仍生成 `r0o/r1/r1o/r2` 单段隔夜/日内规格；只有 `return_periods` 的旧对象仍输出原 `return_N` 和 `{"kind": "simple", "periods": N}` 的close-to-close累计收益规格。不把旧数据重新解释成新标签，不改旧环境或历史报告。因子实现和手写分组逻辑不因此新增预处理。
 
-## 报告有效收益与曲线
+## 报告集合收益与曲线
 
-各组raw收益仍是当日有效log标签的加权均值（按所选等权或市值权），不先对单个标签除以持有期；IC/RankIC直接使用当日因子与原始log标签，不平滑。
+各组 raw 收益仍是当日有效 log 标签的加权均值（按所选等权或市值权），不先对单个标签除以持有期；IC/RankIC 直接使用当日因子与原始 log 标签，不平滑。原始日频标签、换手的原 period 和未来端点公式不变，不把信号因子 momentum 改为 log。
 
-对每个因子、收益列和分组，在报告完整交易日轴上计算：
+令 `P=period`，以 full report 的完整交易日轴首日为固定 anchor，每个因子、收益列和分组独立按连续 P 个真实交易日切成不相交集合，每集合恰有 P 条 raw P 日标签。若交易日为 d1…dN，则第 j 个集合为 `C_j={d_{jP+1},...,d_{(j+1)P}}`（j 从 0 开始），只保留 `(j+1)P<=N` 的完整日期集合。
 
-```text
-effective(t) = mean(raw(t), ..., raw(t-period+1))
-```
+- 集合 log 收益：`collectionlog(C)=sum(rawlog[i] for i in C)/P`。这是算术平均，只做一次 `/P`，不是 mean 后再除以 P。
+- 对应 simple 集合收益：`collection_simple(C)=prod(1+R[i] for i in C)**(1/P)-1`，即这 P 条 P 日收益增长因子的几何平均减一。
 
-这是当前及前 `period-1` 个交易期raw log收益的算术平均；序列开头不足period时使用已有样本，不额外除以period，不平均不同lag。先补齐完整交易日轴，缺失日期保留NULL；窗口中任一raw为NULL，当期effective即为NULL，不跳过NULL求均值。日期选择先在报告全表计算窗口再截取，不能在所选起点重启窗口；`period=1`使用同一规则。
+不使用逐日 rolling average 或 expanding prefix，不平均不同 lag。只有完整 P 日期集合输出一个点，`time` 为集合末日的原观测日期；开头 P-1 个交易日没有集合点，尾部不足 P 个交易日不输出。先按完整真实交易日历补齐缺交易行并填 NULL，任一 raw 为 NULL 则整个集合为 NULL，在集合末日保留断点，不跳过 NULL 凑 P。日期选择先在 full report 全表固定集合后，再按集合末日筛选，不按所选起点重切集合或改变 anchor；`period=1` 使用同一规则。
 
-分组净值为 `exp(cumsum(effective))`。多空先取同日 `high-low` raw log收益，再使用同一窗口及NULL规则；时序 `value=effective` 为log，`cumulative=cumsum(effective)` 为logsum，不是简单收益或净值。
+历史 simple 展示时先转 `ln(1+r)`，`r<=-1` 或非有限值转 NULL；旧 simple 多期数据使用 `group_turnover` 的完整日历补 NULL，缺少时明确报“缺少完整交易日历”，不按已有行压缩；新版 log 的 `group_returns` 已含完整日历，没有 `group_turnover` 仍支持。原收益 metadata 和历史文件不改写。
 
-均值、年化、波动率与Sharpe都使用同一有效序列的非NULL观测：均值为logmean，年化为 `logmean*252`，波动率为 `std(effective)*sqrt(252)`，零无风险利率下Sharpe为 `logmean/std(effective)*sqrt(252)`。所有持有期统一生成曲线和统计；NULL日期留断点、不补零，不可定义的指标保留NULL。
+分组净值为 `exp(cumsum(collectionlog))`，正序/倒序都沿同一集合序列每集合只累计一次。多空取同集合 top-bottom（`high-low`）的集合 log 收益之差；时序 `value=collectionlog` 为 log，`cumulative=cumsum(collectionlog)` 为 logsum，不是简单收益或净值。
+
+分组均值、t 检验/p 值、年化、波动率与 Sharpe 都基于非 NULL 完整集合，每集合为一次 observation，不把 P 条 raw 当 P 次样本；年化频率为 `252/P`，均值为 logmean，年化为 `logmean*252/P`，波动率为 `std(collectionlog)*sqrt(252/P)`，零无风险利率下 Sharpe 为 `logmean/std(collectionlog)*sqrt(252/P)`。所有持有期统一生成曲线与统计；NULL 保留断点、不补零，不可定义的指标保留 NULL。
+
+例如 P20 的 20 条 raw 都对应 10% 的 20 日收益，只输出一个收益 10%、NAV 1.1 的集合点；40 条只输出两个点，NAV 为 1.1、1.21，绝不是 `1.1^40`。完整日期集合中即使只有一条 raw 为 NULL，也不输出伪造的 10% 或跳过缺失另凑 20 条。
 
 ## 返回与校验
 

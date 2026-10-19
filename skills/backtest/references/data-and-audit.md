@@ -16,7 +16,7 @@ Solo 查询本身不自动提供 Arena 历史 helper 的严格日期隔离；Alg
 
 ## 数据域、成员与退出
 
-- `Universe` 单次执行注入 `Universe.member`、`codes=[]` 的 `dataset_query`，不做本地 `codes_query` 预选、不默认加入 filters。`scheme.data.query` 是本地直接执行包装，不是 Runtime alias；每进程首次空 `codes` 从 CoreData 全历史所有记录取 distinct codes 缓存为 tuple，后续复用，不按日期或 `close` 重建，显式 `codes` 原样保留。
+- `Universe` 单次执行注入 `Universe.member`、`codes=[]` 的 `dataset_query`，不做本地 `codes_query` 预选、不默认加入 filters。`scheme.data.query` 是本地直接执行包装，不是 Runtime alias；空 `codes` 直接复用 Arena Runtime 从 Tushare `stock_basic` 合并 `L/D/P` 股票得到的进程缓存，需要 `TUSHARE_TOKEN`；不扫描 CoreData，不按日期或 `close` 重建，显式 `codes` 原样保留且不调用 Tushare。
 - 明确决策使用当前可知成员还是前一完成截面的成员；数据在当天存在不证明盘前已可用。CS 参与域的 `on` 与最终删行 `filters` 分开。
 - `evaluate(start,end)` 返回交易日×固定证券域的 BOOL 面板，非成员和缺失成员为 False；当日或整个区间无成分也保留全 False，不因缺行情缩列。交易日轴仍按请求区间内真实 `close` 日期确定。
 - 行情加载范围与选股范围不同。保留退出/失效股票的交易与估值数据，显式 `symbols` 也要覆盖需要退出的持仓。

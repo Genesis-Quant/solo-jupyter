@@ -4,14 +4,10 @@ services:
   jupyter:
     build:
       context: .
-      network: host
-      args:
-        HTTP_PROXY: http://127.0.0.1:7891
-        HTTPS_PROXY: http://127.0.0.1:7891
-        http_proxy: http://127.0.0.1:7891
-        https_proxy: http://127.0.0.1:7891
     container_name: jupyter
     restart: unless-stopped
+    networks:
+      - default${SOLO_DOCKER_NETWORK:+_external}
     user: root
     working_dir: /home/jovyan/work
     command:
@@ -26,30 +22,28 @@ services:
           python -B -c "import secretstorage, sys; sys.exit(secretstorage.get_default_collection(secretstorage.dbus_init()).is_locked())"
           exec start-notebook.py --ServerApp.root_dir=/home/jovyan/work --ServerApp.default_url=/lab
         '
-    mem_limit: 0
-    memswap_limit: 0
     environment:
-      NB_UID: "1000"
-      NB_GID: "100"
       CHOWN_HOME: "yes"
       CHOWN_HOME_OPTS: "-R"
       CHOWN_EXTRA: /shared/skills
       CHOWN_EXTRA_OPTS: ""
       SOLO_SHARED_DIR: /home/jovyan/work
-      SOLO_REPORT_FRONTEND_URL: ${SOLO_REPORT_FRONTEND_URL:-http://127.0.0.1:5174}
+      UV_CACHE_DIR: /home/jovyan/work/.uv-cache
       JUPYTER_TOKEN: ${JUPYTER_TOKEN:?Set JUPYTER_TOKEN in .env}
       JUPYTER_KEYRING_PASSWORD: ${JUPYTER_KEYRING_PASSWORD:?Set JUPYTER_KEYRING_PASSWORD in .env}
-      HTTP_PROXY: http://metacubexd:7891
-      HTTPS_PROXY: http://metacubexd:7891
-      ALL_PROXY: http://metacubexd:7891
-      NO_PROXY: localhost,127.0.0.1,::1,jupyter,metacubexd
-      http_proxy: http://metacubexd:7891
-      https_proxy: http://metacubexd:7891
-      all_proxy: http://metacubexd:7891
-      no_proxy: localhost,127.0.0.1,::1,jupyter,metacubexd
+      TUSHARE_TOKEN: ${TUSHARE_TOKEN:?Set TUSHARE_TOKEN in .env}
+      SOLO_DOLPHIN_HOST: ${SOLO_DOLPHIN_HOST:-dolphindb}
+      SOLO_DOLPHIN_PORT: ${SOLO_DOLPHIN_PORT:-8848}
+      SOLO_DOLPHIN_USERNAME: ${SOLO_DOLPHIN_USERNAME:?Set SOLO_DOLPHIN_USERNAME in .env}
+      SOLO_DOLPHIN_PASSWORD: ${SOLO_DOLPHIN_PASSWORD:?Set SOLO_DOLPHIN_PASSWORD in .env}
+      BACKTEST_DOLPHIN_HOST: ${BACKTEST_DOLPHIN_HOST:-210.45.79.253}
+      BACKTEST_DOLPHIN_PORT: ${BACKTEST_DOLPHIN_PORT:-18902}
+      BACKTEST_DOLPHIN_USERNAME: ${BACKTEST_DOLPHIN_USERNAME:?Set BACKTEST_DOLPHIN_USERNAME in .env}
+      BACKTEST_DOLPHIN_PASSWORD: ${BACKTEST_DOLPHIN_PASSWORD:?Set BACKTEST_DOLPHIN_PASSWORD in .env}
     ports:
       - "127.0.0.1:8888:8888"
     volumes:
+      - home:/home/jovyan
       - ./data:/home/jovyan/work
       - type: volume
         source: skills
@@ -68,13 +62,14 @@ services:
       - ./config/nbconvert/templates/latex:/home/jovyan/.local/share/jupyter/nbconvert/templates/latex
       - ./ipython_config.py:/etc/ipython/ipython_config.py:ro
       - ./solo_report_bridge.py:/etc/ipython/solo_report_bridge.py:ro
-    networks:
-      - 1panel-network
 
 volumes:
+  home:
   codex-home:
   skills:
 
 networks:
-  1panel-network:
+  default: {}
+  default_external:
     external: true
+    name: ${SOLO_DOCKER_NETWORK:-}

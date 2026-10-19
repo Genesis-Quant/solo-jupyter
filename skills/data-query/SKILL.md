@@ -22,7 +22,7 @@ description: 在 Solo Notebook 查询行情、财务、行业和指数成分，�
 2. 核实基础字段在当前 Runtime 白名单里；供应商文档只能解释单位、频率和来源，不能替代实际字段映射。
 3. 明确边界：直接 Query 的 `end_date` **含当日**；Universe 和策略研究参数的 `end` **不含当日**；新版因子计算/分析是闭区间，调用 Universe 时传 `end + timedelta(days=1)`。避免多减或少减一天。
 4. 将窗口换成足够的日历 lookback；考虑节假日、停牌和上市时间，不能把20日历日当作20交易日。
-5. 每进程首次 `codes=[]` 从 CoreData 全历史所有记录取 distinct codes 缓存为 tuple，不受请求日期或 `close` 限制；后续空列表复用该域，显式 `codes` 不改。指数池单次 `dataset_query` 保留 `codes=[]` 并注入 `Universe.member` 逐日判断，不再预筛选候选；筛选、截面参与和持仓退出分别处理。
+5. 空 `codes` 复用 Arena Runtime `get_codes()`：首次通过 Tushare `stock_basic` 合并 `L/D/P`（上市、退市、暂停上市）股票，去重排序并在进程内缓存，需要 `TUSHARE_TOKEN`；不扫描 CoreData，不受请求日期或 `close` 限制。显式 `codes` 不改且不调用 Tushare。指数池单次 `dataset_query` 保留 `codes=[]` 并注入 `Universe.member` 逐日判断，不再预筛选候选；筛选、截面参与和持仓退出分别处理。
 6. `with` 内读取 `.data` 或在同一会话访问 `.data_ref`。离开会话后只使用已取回的 DataFrame，不再引用会话变量。
 7. 用户要求运行时先验证小范围，检查列类型、日期范围、代码数、NULL率及成员变化，再按请求扩展；不要无界扫描生产库。
 

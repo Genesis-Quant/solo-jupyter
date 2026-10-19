@@ -43,7 +43,7 @@ with universe.query(
 
 此例`end`不含6月8日，并**显式选择**只保留当日成员。若要保留非成员行，移除filters；若只要求某个TS/CS节点在成员内计算，将 `Universe.member` 用于该节点的 `on`。
 
-- `scheme.data.query` 是本地直接执行包装，不是 Runtime `execute_query` 的 alias。每进程第一次收到 `codes=[]` 时，从 CoreData 全历史所有记录读取 distinct codes 并缓存为 tuple；不按请求日期、lookback 或 `close` 筛代码。后续空列表复用该域，显式代码列表原样保留，导入模块不连接数据库。
+- `scheme.data.query` 是本地直接执行包装，不是 Runtime `execute_query` 的 alias。`codes=[]` 直接使用 Arena Runtime 的 `get_codes()`：首次从 Tushare `stock_basic` 合并 `L/D/P`（上市、退市、暂停上市）股票，去重排序并在进程内缓存；需要 `TUSHARE_TOKEN`，不扫描 CoreData，不按请求日期、lookback 或 `close` 筛代码。显式代码列表原样保留且不调用 Tushare，导入模块不联网。
 - 全市场 `StockPool.ALL` 注入恒真成员列；指数池在同一固定证券域上注入每日成员判断，只执行一次查询，没有本地 `codes_query` 预筛选。远端 Arena 自身的 `codes_query` 契约不因此改变，不能把两者混用。
 - 支持 `ALL/SSE50/CSI300/CSI500/CSI1000`；具体字段由当前实现决定，不手写指数权重替代Universe的公共契约。
 - `Universe.member` 是类属性字符串，不是方法，也不是Pydantic输入字段。
