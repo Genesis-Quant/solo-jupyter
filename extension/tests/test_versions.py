@@ -34,11 +34,9 @@ def rejected():
 
 
 @pytest.mark.parametrize("frozen", [False, True])
-@pytest.mark.parametrize("validate,validate_factor", [
-    (False, False), (True, False), (True, True),
-])
-def test_parameters_flags_and_timeout_apply_only_to_calculation_validation(
-    tmp_path, monkeypatch, frozen, validate, validate_factor,
+@pytest.mark.parametrize("validate", [False, True])
+def test_parameters_only_checks_form_without_factor_calculation(
+    tmp_path, monkeypatch, frozen, validate,
 ):
     directory = tmp_path / "project"
     source = tmp_path / "frozen" if frozen else None
@@ -48,18 +46,14 @@ def test_parameters_flags_and_timeout_apply_only_to_calculation_validation(
         returncode=0, stdout="user factor output\n" + json.dumps(payload) + "\n", stderr="",
     ))
     monkeypatch.setattr(versions.subprocess, "run", execute)
-    assert versions.parameters(
-        directory, values, source, validate_factor=validate_factor,
-    ) == payload
+    assert versions.parameters(directory, values, source) == payload
     arguments = [str(directory / ".venv/bin/scheme"), "parameters", "--project", str(source or directory)]
     if validate:
         arguments.append("--validate")
-    if validate_factor:
-        arguments.append("--validate-factor")
     assert execute.call_args.args == (arguments,)
     assert execute.call_args.kwargs["cwd"] == directory
     assert execute.call_args.kwargs["input"] == (json.dumps(values) if validate else None)
-    assert execute.call_args.kwargs["timeout"] == (None if validate_factor else 600)
+    assert execute.call_args.kwargs["timeout"] == 600
     versions.command(["uv", "build", "--wheel"], directory)
     assert execute.call_args.kwargs["timeout"] == 600
 
@@ -180,7 +174,7 @@ def test_background_save_rechecks_before_creating_snapshot(project, monkeypatch,
 
 
 @pytest.mark.parametrize("kind", ["factor", "model", "optimize", "control", "execution"])
-def test_background_save_enables_factor_validation_only_for_factor_kind(
+def test_background_save_builds_every_kind_without_factor_validation(
     project, monkeypatch, tmp_path, kind,
 ):
     project = {**project, "kind": kind}
@@ -194,12 +188,12 @@ def test_background_save_enables_factor_validation_only_for_factor_kind(
     values = {"form": {"window": 17}}
     asyncio.run(versions.save(tmp_path, project, version, values))
     admission.assert_awaited_once_with(project["project_id"])
-    build.assert_called_once_with(tmp_path, version, values, validate_factor=kind == "factor")
+    build.assert_called_once_with(tmp_path, version, values)
     backend.assert_awaited_once_with(f'{project["project_id"]}/versions/{version["id"]}/submit', {})
     assert not dependencies._project_busy
 
 
-def test_background_save_requires_project_kind_instead_of_silently_skipping_validation(
+def test_background_save_does_not_need_kind_to_decide_factor_validation(
     project, monkeypatch, tmp_path,
 ):
     project = {key: value for key, value in project.items() if key != "kind"}
@@ -210,9 +204,9 @@ def test_background_save_requires_project_kind_instead_of_silently_skipping_vali
     monkeypatch.setattr(versions, "backend", backend)
     version = {"id": str(uuid4())}
     asyncio.run(versions.save(tmp_path, project, version, {}))
-    build.assert_not_called()
+    build.assert_called_once_with(tmp_path, version, {})
     backend.assert_awaited_once_with(
-        f'{project["project_id"]}/versions/{version["id"]}/submit', {"error": "'kind'"},
+        f'{project["project_id"]}/versions/{version["id"]}/submit', {},
     )
     assert not dependencies._project_busy
 
@@ -252,7 +246,7 @@ def test_active_save_checks_before_parameters_and_creates_version(project, monke
     save.assert_awaited_once()
 
 
-def test_factor_validation_failure_after_record_creation_uses_only_error_callback(
+def test_frozen_parameter_failure_after_record_creation_uses_only_error_callback(
     build_project, tmp_path, monkeypatch, project,
 ):
     directory = build_project
@@ -264,18 +258,16 @@ def test_factor_validation_failure_after_record_creation_uses_only_error_callbac
     submissions = []
     command = Mock(side_effect=AssertionError("failed validation continued a build command"))
 
-    def parameters(selected_directory, submitted, source=None, *, validate_factor=False):
+    def parameters(selected_directory, submitted, source=None):
         assert project["project_id"] in dependencies._project_busy
         assert selected_directory == directory
         assert submitted == values
         if source is None:
-            assert validate_factor is False
             events.append("schema")
             return {}
         assert source == target / "source"
-        assert validate_factor is True
-        events.append("factor validation")
-        raise ValueError("factor differs on sampled date")
+        events.append("frozen parameters")
+        raise ValueError("frozen source has invalid form")
 
     async def backend(path, body=None):
         assert project["project_id"] in dependencies._project_busy
@@ -301,10 +293,10 @@ def test_factor_validation_failure_after_record_creation_uses_only_error_callbac
         await asyncio.gather(*versions._tasks)
 
     asyncio.run(run())
-    assert events == ["schema", "record", "factor validation", "error callback"]
+    assert events == ["schema", "record", "frozen parameters", "error callback"]
     assert submissions == [(
         f'{project["project_id"]}/versions/{version["id"]}/submit',
-        {"error": "factor differs on sampled date"},
+        {"error": "frozen source has invalid form"},
     )]
     command.assert_not_called()
     assert not (target / "wheels").exists()
@@ -352,9 +344,8 @@ def test_save_owns_gate_from_record_creation_through_background_submit(project, 
         await rejected_install()
         steps.append("submit" if path.endswith("submit") else "record")
         return version
-    def build(*args, validate_factor):
+    def build(*args):
         assert project["project_id"] in dependencies._project_busy
-        assert validate_factor is False
         steps.append("build")
     monkeypatch.setattr(versions, "backend", backend)
     monkeypatch.setattr(versions, "build_version", build)
@@ -405,7 +396,7 @@ def build_project(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("kind", ["factor", "model"])
-def test_build_version_validates_only_frozen_factor_source_once_and_uses_validation_payload(
+def test_build_version_checks_frozen_parameters_once_without_factor_calculation(
     build_project, tmp_path, monkeypatch, kind,
 ):
     directory = build_project
@@ -419,12 +410,11 @@ def test_build_version_validates_only_frozen_factor_source_once_and_uses_validat
     }
     calls = []
 
-    def parameters(directory_arg, submitted, source, *, validate_factor):
+    def parameters(directory_arg, submitted, source):
         calls.append("parameters")
         assert directory_arg == directory
         assert submitted == values
         assert source == target / "source"
-        assert validate_factor is (kind == "factor")
         assert tomllib.loads((source / "pyproject.toml").read_text())["project"]["version"] == "1.2.1"
         assert (source / "src/sample/__init__.py").read_text() == "VALUE = 1\n"
         assert not (target / "wheels").exists()
@@ -433,9 +423,8 @@ def test_build_version_validates_only_frozen_factor_source_once_and_uses_validat
     parameters_mock = Mock(side_effect=parameters)
     monkeypatch.setattr(versions, "parameters", parameters_mock)
 
-    def command(arguments, cwd, payload=None, *, timeout=600):
+    def command(arguments, cwd, payload=None):
         calls.append(arguments[:2])
-        assert timeout == 600
         if arguments[:2] == ["uv", "build"]:
             wheels = Path(arguments[arguments.index("--out-dir") + 1])
             (wheels / "sample-1.2.1-py3-none-any.whl").write_bytes(b"candidate")
@@ -447,13 +436,8 @@ def test_build_version_validates_only_frozen_factor_source_once_and_uses_validat
         return json.dumps({"version": "1.6.3", "direct": {}})
 
     monkeypatch.setattr(versions, "command", command)
-    if kind == "factor":
-        versions.build_version(directory, version, values, validate_factor=True)
-    else:
-        versions.build_version(directory, version, values)
-    parameters_mock.assert_called_once_with(
-        directory, values, target / "source", validate_factor=kind == "factor",
-    )
+    versions.build_version(directory, version, values)
+    parameters_mock.assert_called_once_with(directory, values, target / "source")
     assert calls[0] == "parameters"
     assert calls[1] == ["uv", "build"]
     data = json.loads((target / "input.json").read_text())
@@ -469,10 +453,10 @@ def test_build_version_validates_only_frozen_factor_source_once_and_uses_validat
 
 
 @pytest.mark.parametrize("error", [
-    ValueError("factor differs on sampled date"),
+    ValueError("invalid factor form"),
     subprocess.CalledProcessError(1, ["scheme", "parameters"]),
 ])
-def test_background_factor_validation_failure_only_submits_error_and_stops_build(
+def test_background_parameter_failure_only_submits_error_and_stops_build(
     build_project, tmp_path, monkeypatch, project, error,
 ):
     project = {**project, "kind": "factor"}
@@ -488,7 +472,7 @@ def test_background_factor_validation_failure_only_submits_error_and_stops_build
     monkeypatch.setattr(versions, "command", command)
     monkeypatch.setattr(versions, "backend", backend)
     asyncio.run(versions.save(directory, project, version, values))
-    parameters.assert_called_once_with(directory, values, target / "source", validate_factor=True)
+    parameters.assert_called_once_with(directory, values, target / "source")
     command.assert_not_called()
     backend.assert_awaited_once_with(
         f'{project["project_id"]}/versions/{version["id"]}/submit', {"error": str(error)},
@@ -502,10 +486,10 @@ def test_background_factor_validation_failure_only_submits_error_and_stops_build
 
 
 @pytest.mark.parametrize("message", [
-    "factor differs on sampled date",
-    "scheme: error: unrecognized arguments: --validate-factor",
+    "invalid factor form",
+    "scheme: error: missing project parameters",
 ])
-def test_cli_factor_validation_failure_with_success_shaped_stdout_is_not_accepted(
+def test_cli_parameter_failure_with_success_shaped_stdout_is_not_accepted(
     build_project, tmp_path, monkeypatch, message,
 ):
     directory = build_project
@@ -517,10 +501,10 @@ def test_cli_factor_validation_failure_with_success_shaped_stdout_is_not_accepte
     ))
     monkeypatch.setattr(versions.subprocess, "run", execute)
     with pytest.raises(ValueError, match=message):
-        versions.build_version(directory, version, {"form": {}}, validate_factor=True)
+        versions.build_version(directory, version, {"form": {}})
     execute.assert_called_once()
-    assert execute.call_args.args[0][-2:] == ["--validate", "--validate-factor"]
-    assert execute.call_args.kwargs["timeout"] is None
+    assert execute.call_args.args[0][-1] == "--validate"
+    assert execute.call_args.kwargs["timeout"] == 600
     assert not (target / "wheels").exists()
     assert not (target / "input.json").exists()
 

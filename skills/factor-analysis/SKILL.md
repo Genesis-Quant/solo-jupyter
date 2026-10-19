@@ -16,7 +16,7 @@ description: 在 Solo 创建或修改因子研究、Factor/FactorParams/ReportFo
 3. 新因子接口的 `compute(start, end)` 只返回类声明 columns 的数值列，支持 `(date,symbol)` 唯一索引或 `time/code` 平表（包装层转为面板），不返回暴露或未声明列。日期在闭区间 `[start,end]`，`compute(d,d)` 返回当天；旧项目仍以安装版本的区间约定为准。代码通过 `engine_symbol` 规范化，规范化后仍需唯一。
 4. `Universe.query` 单次执行 `dataset_query`（`codes=[]` 并注入每日成员列），不再两阶段预筛选。底层 `scheme.data.query` 是本地直接执行包装，不是 Runtime alias；空 `codes` 直接复用 Arena Runtime `get_codes()`，首次通过 Tushare `stock_basic` 合并 `L/D/P`（上市、退市、暂停上市）股票并在进程内缓存，需要 `TUSHARE_TOKEN`；不扫描 CoreData，不受查询日期或 `close` 限制。显式 `codes` 不改且不调用 Tushare。`evaluate` 返回交易日×固定证券域 BOOL 面板，无成分日为全 False、不因缺行情缩列。共享查询仍为半开区间，因此闭区间因子传入 `end + timedelta(days=1)`。成员列不自动过滤。根据业务明确选择 `filters=[Universe.member]`、节点 `on` 或保留非成员记录。
 5. 用项目 `FactorReportForm(...).build()` 构造分析参数；表单绑定项目AnalysisParams，不复制一套不一致的Notebook参数。新接口用 `period`（持有期，默认1）、`max_lag`（入场延迟上限，默认1），均为严格正整数、不接受bool；`price_column` 可选 `open/close/open_hfq/close_hfq`，默认 `open_hfq`。旧项目按已安装版本保留原参数和收益定义。
-6. 先离线核对DSL和参数，再按用户请求小范围 `params.run(Factor)`。需要分段一致性检查时调用因子对象的 `validate(start,end,n_sample)`；保存版本会自动对冻结源码校验一次，默认抽最多5个唯一日期，逐个用 `compute(d,d)` 对照整表全部证券和列。抽样通过不是全日期的证明。检查实际面板、日期、NaN、样本数、标签有效率后扩展。
+6. 先离线核对DSL和参数，再按用户请求小范围 `params.run(Factor)`。把因子对象的 `validate(start,end,n_sample)` 放在因子Notebook最后一个代码单元，供用户手动执行；保存版本、构建和正式任务不自动调用，也不以抽样一致性作为提交前置条件。手动校验默认抽最多5个唯一日期，逐个用 `compute(d,d)` 对照整表全部证券和列，抽样通过不是全日期的证明。检查实际面板、日期、NaN、样本数、标签有效率后扩展。
 7. 只有真实Jupyter桥接上下文才使用 `report.show()`；它会保存报告，不再重复调用save造成双份输出。独立脚本使用 `report.save(新目录)`，不要声称浏览器展示已验证。
 
 ## 不可混用的口径
