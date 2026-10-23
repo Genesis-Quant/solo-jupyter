@@ -1,9 +1,7 @@
 {
-  "NotebookNotary": {
-    "data_dir": "/home/jovyan/.jupyter/notary"
-  },
   "FileContentsManager": {
     "always_delete_dir": true,
+    "allow_hidden": true,
     "hide_globs": [
       "__pycache__",
       "*.pyc",
@@ -17,9 +15,6 @@
       ".mypy_cache",
       "*.egg-info"
     ]
-  },
-  "PersonaManager": {
-    "default_persona_id": "jupyter-ai-personas::jupyter_ai_acp_client::CodexAcpPersona"
   },
   "ResourceUseDisplay": {
     "track_cpu_percent": true,

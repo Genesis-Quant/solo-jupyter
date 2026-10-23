@@ -90,7 +90,7 @@ def copy_source(source: Path, destination: Path) -> None:
 
 
 def build_version(directory: Path, version: dict, values: dict) -> None:
-    target = Path(os.environ.get("SOLO_SHARED_DIR", "/shared")) / "runs" / version["id"]
+    target = Path(os.environ.get("SOLO_SHARED_DIR", "/home/jovyan")) / "runs" / version["id"]
     target.mkdir(exist_ok=False)
     source = target / "source"
     copy_source(directory, source)
@@ -147,6 +147,9 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
         sources["scheme"] = {"path": str(destination)}
     environment = target / "environment"
     environment.mkdir()
+    for location in sources.values():
+        if isinstance(location, dict) and "path" in location:
+            location["path"] = Path(os.path.relpath(location["path"], environment)).as_posix()
     # 研究任务显式安装选中的 Algo；不要求当前交付 wheel 依赖上游研究包。
     research_dependencies = [f"{package}=={version['packageVersion']}"]
     research_dependencies.extend(
@@ -169,9 +172,9 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
     frozen_lock = tomllib.loads((environment / "uv.lock").read_text())
     if any({"directory", "editable"} & p["source"].keys() for p in frozen_lock["package"]):
         raise ValueError("正式环境仍包含未冻结的源码依赖")
-    component = {"package": package, "version": version["packageVersion"], "wheel": str(wheel),
+    component = {"package": package, "version": version["packageVersion"], "wheel": wheel.relative_to(target).as_posix(),
                  "entry": parameters_result["entry"]}
-    data = {"environment": {"lockfile": str(environment / "uv.lock")}, "output": str(target / "report")}
+    data = {"environment": {"lockfile": "environment/uv.lock"}, "output": "report"}
     if "factor" in parameters_result:
         data.update(kind="factor", factor={**component, "params": parameters_result["factor"]},
                     analysis=parameters_result["analysis"])
@@ -181,8 +184,8 @@ def build_version(directory: Path, version: dict, values: dict) -> None:
             location = sources.get(upstream["package"], {})
             if "path" not in location:
                 raise ValueError(f"上游 {upstream['package']} 缺少冻结 wheel，请通过插件安装项目后重试")
-            upstream_wheel = Path(location["path"])
-            components[kind] = {**upstream, "wheel": str(upstream_wheel)}
+            upstream_wheel = (environment / location["path"]).resolve()
+            components[kind] = {**upstream, "wheel": upstream_wheel.relative_to(target.resolve()).as_posix()}
         data.update(kind=parameters_result["project_kind"], algos=components, backtest=parameters_result["backtest"])
     (target / "input.json").write_text(json.dumps(data, ensure_ascii=False, indent=2))
     (target / "build.json").write_text(json.dumps({"scheme_version": installed["version"]}))

@@ -18,7 +18,7 @@ from .handlers import KINDS
 class SoloProjectConfig(ConfigSource):
     def __init__(self, root_path, *, shared_dir=None, virtual_dir=None):
         super().__init__(root_path)
-        self.shared_dir = Path(shared_dir or os.getenv("SOLO_SHARED_DIR", "/shared")).resolve()
+        self.shared_dir = Path(shared_dir or os.getenv("SOLO_SHARED_DIR", "/home/jovyan")).resolve()
         virtual = Path(virtual_dir or os.getenv("JP_LSP_VIRTUAL_DIR", ".virtual_documents"))
         self.virtual_dir = (virtual if virtual.is_absolute() else self.shared_dir / virtual).resolve()
         self._signatures = {}

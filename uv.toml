@@ -1,6 +1,0 @@
-link-mode = "hardlink"
-python-install-mirror = "https://registry.npmmirror.com/-/binary/python-build-standalone"
-
-[[index]]
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-default = true

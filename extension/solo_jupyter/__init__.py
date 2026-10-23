@@ -8,7 +8,7 @@ from jupyter_server.utils import url_path_join
 
 from .dependencies import DependenciesHandler, ProjectOperationsHandler
 from .files import FilesHandler
-from .handlers import ProjectHandler
+from .handlers import ProjectEnvironmentHandler, ProjectHandler
 from .versions import VersionsHandler
 
 
@@ -21,6 +21,7 @@ def _load_jupyter_server_extension(server_app: ServerApp) -> None:
     route = url_path_join(web_app.settings["base_url"], "solo", "project")
     web_app.add_handlers(".*$", [
         (route, ProjectHandler),
+        (route + "/environment", ProjectEnvironmentHandler),
         (route + "/dependencies", DependenciesHandler),
         (route + "/versions", VersionsHandler),
         (route + "/operations", ProjectOperationsHandler),

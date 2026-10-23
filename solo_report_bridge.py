@@ -109,7 +109,7 @@ def _manifest(report, *, theme, annual_trading_days, risk_free_rate):
 
 
 def _report_directory():
-    workspace = Path(os.environ.get("SOLO_SHARED_DIR", "/shared")).resolve()
+    workspace = Path(os.environ.get("SOLO_SHARED_DIR", "/home/jovyan")).resolve()
     current = Path.cwd().resolve()
     if not current.is_relative_to(workspace) or any(part.startswith(".") for part in current.relative_to(workspace).parts):
         raise ValueError("请在 Jupyter 工作区内的项目目录展示报告")
