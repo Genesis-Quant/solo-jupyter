@@ -15,7 +15,7 @@ description: 在 Solo/Jupyter 中实现和审计策略回测 backtest、Algo cal
 ## 工作顺序
 
 1. 使用当前项目 `.venv` / kernel，先离线核对版本、安装路径、签名及分析参数/表单 schema。采用传统 `TypeVar`/`Generic` 写法，不默认升级或改用全局 Python 3.13。
-2. 读取 [API 与示例](references/api-examples.md)，选当前 Model 报告表单或 `ExecutionReportForm` 路径。检查是否真的有 `form.run()`；当前 Scheme 1.5.0 基类是 `form.build().run(AlgoClass)`，不要凭名字添加方法。
+2. 读取 [API 与示例](references/api-examples.md)，选当前 Model 报告表单或 `ExecutionReportForm` 路径。检查是否真的有 `form.run()`；当前 Scheme 1.12 基类是 `form.build().run(AlgoClass)`，不要凭名字添加方法。
 3. 保留当前项目参数、上下文与四环节职责：Model 写信号，Optimize 写目标，Control 写订单，Execution 下单；长期状态放算法自身。检查额外的项目专用钩子，不把它们冒充四个公共回调。
 4. 运行前读 [数据与最低审计](references/data-and-audit.md)，明确 `[start,end)`、信号可用时点、价格尺度、进程固定证券域与逐日成员、缺价和撮合假设。
 5. 对外连接/运行仅限用户任务已授权的数据域与规模；复用现有环境凭据而不打印。先小样本，结果提取完成后由封装回收自己的 engine/session，不操作他人或生产引擎。
@@ -24,10 +24,10 @@ description: 在 Solo/Jupyter 中实现和审计策略回测 backtest、Algo cal
 
 ## 不能省的正确性检查
 
-- Scheme 1.5.0 使用不含结束日的日期；原生插件配置的 `endDate` 可能含结束日，适配层只转换一次。
+- Scheme 1.12 使用不含结束日的日期；原生插件配置的 `endDate` 可能含结束日，适配层只转换一次。
 - 原始行情必须核对缺失字段、NULL/NaN/非有限值、非正价格与代码后缀；不沿用 Arena 自动复权或缺价回填。
 - 查询与交易价格、分红除权、费用和基准口径分别确认；没有前视代码不代表供应商数据严格 point-in-time。
-- 固定证券域不是当日有效池；`Universe` 单次 `dataset_query` 以 `codes=[]` 注入 `Universe.member`，不做 `codes_query` 预选、不默认过滤。`evaluate` 保留固定证券列，当日无成分为全 False；退出股票仍需行情、真实持仓与成交确认。
+- 区间候选并集不是每日成员。Universe.codes 先过滤成员再取并集；evaluate 返回真实交易日 × 历史成员 BOOL 面板，非成员日 False，空成员区间有日历零列。回测行情覆盖历史成员并集，退出证券仍需报价、真实持仓和成交确认。
 - 空持仓、空信号、缺行、零值和 NULL 分开处理。卖单已提交不代表现金可用，部分成交后重新对账账户与在途订单。
 - 终态集合为 `{1,2,-1,-3}`，`-2` 撤单拒绝不是终态；终态也不等于全部成交。不要等待保证不存在的终态回调。
 - `get_orders()` 是尚未消费的回报，不是活动订单查询。不要重复下同一目标造成超额交易。

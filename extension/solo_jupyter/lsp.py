@@ -18,12 +18,18 @@ from .handlers import KINDS
 class SoloProjectConfig(ConfigSource):
     def __init__(self, root_path, *, shared_dir=None, virtual_dir=None):
         super().__init__(root_path)
-        self.shared_dir = Path(shared_dir or os.getenv("SOLO_SHARED_DIR", "/home/jovyan")).resolve()
-        virtual = Path(virtual_dir or os.getenv("JP_LSP_VIRTUAL_DIR", ".virtual_documents"))
-        self.virtual_dir = (virtual if virtual.is_absolute() else self.shared_dir / virtual).resolve()
-        self._signatures = {}
-        self._completion_paths = {}
-        self._lock = RLock()
+        self.shared_dir = Path(
+            shared_dir or os.getenv("SOLO_SHARED_DIR", "/home/jovyan")
+        ).resolve()
+        virtual = Path(
+            virtual_dir or os.getenv("JP_LSP_VIRTUAL_DIR", ".virtual_documents")
+        )
+        self.virtual_dir = (
+            virtual if virtual.is_absolute() else self.shared_dir / virtual
+        ).resolve()
+        self.signatures = {}
+        self.completion_paths = {}
+        self.lock = RLock()
 
     def user_config(self):
         return {}
@@ -34,7 +40,12 @@ class SoloProjectConfig(ConfigSource):
         value = str(document_path)
         uri = urlsplit(value)
         if uri.scheme:
-            if uri.scheme != "file" or uri.netloc not in {"", "localhost"} or uri.query or uri.fragment:
+            if (
+                uri.scheme != "file"
+                or uri.netloc not in {"", "localhost"}
+                or uri.query
+                or uri.fragment
+            ):
                 return None
             value = unquote(uri.path)
         path = Path(value)
@@ -48,8 +59,14 @@ class SoloProjectConfig(ConfigSource):
             relative = path.relative_to(self.shared_dir / "projects")
             if len(relative.parts) < 3 or relative.parts[0] not in KINDS:
                 return None
-            project = self.shared_dir / "projects" / relative.parts[0] / relative.parts[1]
-            return project if project.resolve() == project and path.is_relative_to(project) else None
+            project = (
+                self.shared_dir / "projects" / relative.parts[0] / relative.parts[1]
+            )
+            return (
+                project
+                if project.resolve() == project and path.is_relative_to(project)
+                else None
+            )
         except (OSError, ValueError, RuntimeError):
             return None
 
@@ -63,7 +80,10 @@ class SoloProjectConfig(ConfigSource):
         venv = project / ".venv"
         python = venv / "bin/python"
         try:
-            if not all(path.is_file() and path.resolve().is_relative_to(project) for path in (marker, manifest)):
+            if not all(
+                path.is_file() and path.resolve().is_relative_to(project)
+                for path in (marker, manifest)
+            ):
                 return {}
             if not (venv / "pyvenv.cfg").is_file():
                 return {}
@@ -76,30 +96,37 @@ class SoloProjectConfig(ConfigSource):
         except (OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError):
             return {}
         # uv links bin/python to its managed installation; keep the venv path for Jedi.
-        return {"plugins": {"jedi": {
-            "environment": str(python),
-            "extra_paths": [str(source)],
-        }}}
+        return {
+            "plugins": {
+                "jedi": {
+                    "environment": str(python),
+                    "extra_paths": [str(source)],
+                }
+            }
+        }
 
     def refresh(self, config, workspace, document_path):
         project = self.project_path(document_path)
         if project is None:
             return
-        signature = tuple(self._stamp(project / name) for name in (".venv/bin/python", "uv.lock"))
-        with self._lock:
-            if self._signatures.get(project) != signature:
-                self._signatures[project] = signature
+        signature = tuple(
+            self.file_stamp(project / name) for name in (".venv/bin/python", "uv.lock")
+        )
+        with self.lock:
+            if self.signatures.get(project) != signature:
+                self.signatures[project] = signature
                 config.settings.cache_clear()
                 workspace._environments.pop(str(project / ".venv/bin/python"), None)
-                self._invalidate_completion_resolvers(project)
+                self.invalidate_completion_resolvers(project)
         return project
 
-    def _invalidate_completion_resolvers(self, project):
-        external_paths = self._completion_paths.pop(project, set())
+    def invalidate_completion_resolvers(self, project):
+        external_paths = self.completion_paths.pop(project, set())
         # pylsp 1.15 keys include module_path, but not the Jedi environment.
         for resolver in (LABEL_RESOLVER, SNIPPET_RESOLVER):
             keys = {
-                key for key in tuple(resolver._cache)
+                key
+                for key in tuple(resolver._cache)
                 if key[1] is not None
                 and (key[1].is_relative_to(project) or key[1] in external_paths)
             }
@@ -115,31 +142,35 @@ class SoloProjectConfig(ConfigSource):
         project = document.shared_data.get("solo_project")
         if project is None:
             return
-        with self._lock:
+        with self.lock:
             cached_paths = {
-                key[1] for resolver in (LABEL_RESOLVER, SNIPPET_RESOLVER)
-                for key in tuple(resolver._cache) if key[1] is not None
+                key[1]
+                for resolver in (LABEL_RESOLVER, SNIPPET_RESOLVER)
+                for key in tuple(resolver._cache)
+                if key[1] is not None
             }
             # External editable modules have no project prefix. Track only exact
             # cached origins used here, and forget entries that pylsp has expired.
-            for owner, paths in tuple(self._completion_paths.items()):
+            for owner, paths in tuple(self.completion_paths.items()):
                 paths.intersection_update(cached_paths)
                 if not paths:
-                    del self._completion_paths[owner]
-            for _, completion in document.shared_data.get("LAST_JEDI_COMPLETIONS", {}).values():
+                    del self.completion_paths[owner]
+            for identifier, completion in document.shared_data.get(
+                "LAST_JEDI_COMPLETIONS", {}
+            ).values():
                 path = completion.module_path
                 if path in cached_paths and not path.is_relative_to(project):
-                    self._completion_paths.setdefault(project, set()).add(path)
+                    self.completion_paths.setdefault(project, set()).add(path)
 
     @staticmethod
-    def _stamp(path):
+    def file_stamp(path):
         try:
             return path.stat().st_mtime_ns
         except OSError:
             return None
 
 
-def _enable_project_config(config):
+def enable_project_config(config):
     if "solo" not in config._config_sources:
         return
     sources = config._settings.get("configurationSources", DEFAULT_CONFIG_SOURCES)
@@ -154,27 +185,27 @@ def _enable_project_config(config):
 def pylsp_settings(config):
     # pylsp 1.15 has no public registration API for document-scoped config sources.
     config._config_sources["solo"] = SoloProjectConfig(config._root_path)
-    _enable_project_config(config)
+    enable_project_config(config)
     return {"plugins": {"solo_project_environment": {"enabled": True}}}
 
 
 @hookimpl
 def pylsp_initialize(config, workspace):
-    _enable_project_config(config)
-    _enable_project_config(workspace._config)
+    enable_project_config(config)
+    enable_project_config(workspace._config)
 
 
 @hookimpl
 def pylsp_workspace_configuration_changed(config, workspace):
-    _enable_project_config(config)
-    _enable_project_config(workspace._config)
+    enable_project_config(config)
+    enable_project_config(workspace._config)
 
 
-def _refresh(config, workspace, document):
+def refresh_document(config, workspace, document):
     # pylsp 1.15 moves open documents between workspaces without rebinding their owners.
     actual_workspace = getattr(document, "_workspace", None) or workspace
     actual_config = getattr(document, "_config", None) or config
-    _enable_project_config(actual_config)
+    enable_project_config(actual_config)
     source = actual_config._config_sources.get("solo")
     if source is not None:
         project = source.refresh(actual_config, actual_workspace, document.path)
@@ -184,24 +215,26 @@ def _refresh(config, workspace, document):
             # project's signature. Drop its cached binding as well.
             actual_config.settings.cache_clear()
             if previous is not None:
-                actual_workspace._environments.pop(str(previous / ".venv/bin/python"), None)
+                actual_workspace._environments.pop(
+                    str(previous / ".venv/bin/python"), None
+                )
             document.shared_data["solo_project"] = project
 
 
 @hookimpl
 def pylsp_document_did_open(config, workspace, document):
-    _refresh(config, workspace, document)
+    refresh_document(config, workspace, document)
 
 
 @hookimpl(hookwrapper=True, tryfirst=True)
 def pylsp_definitions(config, workspace, document, position):
-    _refresh(config, workspace, document)
+    refresh_document(config, workspace, document)
     yield
 
 
 @hookimpl(hookwrapper=True, tryfirst=True)
 def pylsp_completions(config, workspace, document, position, ignored_names):
-    _refresh(config, workspace, document)
+    refresh_document(config, workspace, document)
     yield
     actual_config = getattr(document, "_config", None) or config
     source = actual_config._config_sources.get("solo")
@@ -211,48 +244,48 @@ def pylsp_completions(config, workspace, document, position, ignored_names):
 
 @hookimpl(hookwrapper=True, tryfirst=True)
 def pylsp_hover(config, workspace, document, position):
-    _refresh(config, workspace, document)
+    refresh_document(config, workspace, document)
     yield
 
 
 @hookimpl(hookwrapper=True, tryfirst=True)
 def pylsp_references(config, workspace, document, position, exclude_declaration):
-    _refresh(config, workspace, document)
+    refresh_document(config, workspace, document)
     yield
 
 
 @hookimpl(hookwrapper=True, tryfirst=True)
 def pylsp_signature_help(config, workspace, document, position):
-    _refresh(config, workspace, document)
+    refresh_document(config, workspace, document)
     yield
 
 
 @hookimpl(hookwrapper=True, tryfirst=True)
 def pylsp_lint(config, workspace, document, is_saved):
-    _refresh(config, workspace, document)
+    refresh_document(config, workspace, document)
     yield
 
 
 @hookimpl(hookwrapper=True, tryfirst=True)
 def pylsp_type_definition(config, document, position):
     # Unlike the other document hooks, this hookspec has no workspace argument.
-    _refresh(config, None, document)
+    refresh_document(config, None, document)
     yield
 
 
 @hookimpl(hookwrapper=True, tryfirst=True)
 def pylsp_document_symbols(config, workspace, document):
-    _refresh(config, workspace, document)
+    refresh_document(config, workspace, document)
     yield
 
 
 @hookimpl(hookwrapper=True, tryfirst=True)
 def pylsp_document_highlight(config, workspace, document, position):
-    _refresh(config, workspace, document)
+    refresh_document(config, workspace, document)
     yield
 
 
 @hookimpl(hookwrapper=True, tryfirst=True)
 def pylsp_rename(config, workspace, document, position, new_name):
-    _refresh(config, workspace, document)
+    refresh_document(config, workspace, document)
     yield

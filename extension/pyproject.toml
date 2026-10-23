@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "solo-jupyter"
-version = "0.1.2"
+version = "0.2.1"
 description = "Solo project integration for JupyterLab"
 requires-python = ">=3.12"
 dependencies = ["jupyterlab>=4.6,<5", "jupyter-server>=2,<3", "packaging>=24", "tomlkit>=0.13,<1"]

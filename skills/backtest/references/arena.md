@@ -49,6 +49,6 @@ Arena Backend commit `802cb0fd4ef45a0fc7db6168b96497de68eda537`，Arena 仓库�
 - `backend/docs/backtest/dynamic-pool.md`
 - `backend/docs/backtest/interfaces.md`
 
-Solo 基线 Scheme 1.5.0 / Backtest 0.1.1，Solo 仓库实现为 `algos/scheme/src/scheme/{base,execute/strategy,data/dolphindb}` 与 `backtest/src/backtest`，并对照当前项目 `.venv` 的安装签名/schema。
+Solo 基线 Scheme 1.12 / Backtest 0.2，Solo 仓库实现为 `algos/scheme/src/scheme/{base,execute/strategy,data/dolphindb}` 与 `backtest/src/backtest`，并对照当前项目 `.venv` 的安装签名/schema。
 
 当前项目锁与安装实现确定本地 API，实际 Server/插件版本与 schema 确定运行能力；静态 Arena 文档只描述其特定 Runtime，不能覆盖另一部署。验收分别记录离线检查、真实请求/撮合、结果 QA 与 Jupyter 显示，不将一个环节的成功描述成全部已验证。

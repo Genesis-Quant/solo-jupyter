@@ -2,7 +2,7 @@
 
 ## 项目环境先行
 
-版本基线为 Scheme 1.5.0、Backtest 0.1.1、DolphinDB SDK 3.0.4.2。使用当前项目 `.venv` / kernel 的 Python 3.12，核对锁与安装实现；不要使用另一个项目或全局 Python 3.13 环境替代它。
+版本基线为 Scheme 1.12、Backtest 0.2、DolphinDB SDK 3.0.4.2。使用当前项目 `.venv` / kernel 的 Python 3.12，核对锁与安装实现；不要使用另一个项目或全局 Python 3.13 环境替代它。
 
 ```python
 import inspect
@@ -83,7 +83,7 @@ parameters = form.build()  # 构造/校验；不执行研究。
 # report = parameters.run(ModelAlgo)
 ```
 
-Scheme 1.5.0 的 Model 表单默认后续环节是 `risk_parity`、`no_control`、`direct_execution`。`no_control` 不等于生产风险控制已完整实现；默认执行也不意味着所有订单立即成交。只改信号时优先保留这条组装链路。
+Scheme 1.12 的 Model 表单默认后续环节是 `risk_parity`、`no_control`、`direct_execution`。`no_control` 不等于生产风险控制已完整实现；默认执行也不意味着所有订单立即成交。只改信号时优先保留这条组装链路。
 
 基类表单没有 `form.run()`，实际是 `.build()` 得到分析参数再 `.run(AlgoClass, ctx=..., settings=...)`。如果项目自定义提供了便捷方法，先 inspect 后使用。不要把算法实例或普通 `backtest.Algo` 直接传给要求 Scheme `ModelAlgo` 的研究入口。
 

@@ -31,7 +31,7 @@ FILTERS = [valid]
 
 编译 `application="query"` 用于 Query 及所有 codes_query；Factor/Backtest dataset 分别用 `factor`/`backtest`。先编译再提交完整请求，编译成功不证明日期、收益标签、股票池或回调已全部有效。
 
-Factor 的收益标签是托管状态，回填 `compiled_json` 时不能删除 `return_columns` 对应的收益节点。Arena 指数池 Factor 还会自动应用成员过滤，这不等于 Solo `Universe.query` 的行为。
+Arena Factor 的收益标签是托管状态，回填 compiled_json 不能删除 return_columns 对应节点。Arena 自动注入成员与过滤属于远端请求契约；Solo 普通 Query 则显式定义 MEMBERS[universe.pool]，不能把候选代码视为托管节点。
 
 ## 不得混用的层次
 

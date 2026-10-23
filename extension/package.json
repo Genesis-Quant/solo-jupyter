@@ -1,6 +1,6 @@
 {
   "name": "@solo/jupyter-extension",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Solo project integration for JupyterLab",
   "main": "lib/index.js",

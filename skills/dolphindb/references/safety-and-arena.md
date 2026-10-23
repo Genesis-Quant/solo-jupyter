@@ -27,14 +27,14 @@ Arena 文档契约与本地连接不同：
 ## 来源与覆盖规则
 
 - Arena Backend commit `802cb0fd4ef45a0fc7db6168b96497de68eda537`，Arena 仓库文件 `backend/docs/overview/dolphindb.md`；这是文档基线，不是 Server 版本。
-- Scheme 1.5.0：Solo 仓库 `algos/scheme/src/scheme/data/dolphindb/{api,universe}.py`、`data/dolphindb/database/session.py`、`config.py`。
-- Backtest 0.1.1；当前用户项目锁、已安装实现与实测覆盖静态说明。
+- Scheme 1.12：Solo 仓库 `algos/scheme/src/scheme/data/dolphindb/{api,universe}.py`、`data/dolphindb/database/session.py`、`config.py`。
+- Backtest 0.2；核对当前用户项目锁、已安装实现与实测，不自动回退旧接口。
 - 验收分别记录本地包版本/签名/schema/日期转换和服务端版本/数据/权限；只有离线检查时，不声称服务端与实际查询已经验证。
 
 ## 人工试用提示（不自动操作生产）
 
-1. “这个 Solo Jupyter 项目用 Python 3.12。帮我检查 DolphinDB SDK 和 `Universe.query` 的参数，只做离线自省，不联网、不升级依赖。”
-   - 期待：使用项目解释器；指出 `[start,end)`、注入成员但不默认 filters；不打印环境值、不执行查询。
+1. “这个 Solo Jupyter 项目用 Python 3.12。帮我检查 DolphinDB SDK、`query`、`Universe.codes/evaluate` 的参数，只做离线自省，不联网、不升级依赖。”
+   - 期待：使用项目解释器；区分普通 Query 闭区间和 Universe 半开区间，说明候选并集与逐日成员不同；不打印环境值、不执行查询。
 2. “允许用现有连接只读检查 CoreData 的字段。为什么这个原始表没有 `up_limit`？先查版本/schema，不要补造价格，也不要扫描全库。”
    - 期待：先元数据、最小有界检查并关闭 session；区分原始表与查询字段；缺字段报告未满足，不套 Arena 回填。服务端权限仍以实测为准。
 

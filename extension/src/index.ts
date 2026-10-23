@@ -8,6 +8,7 @@ import { ICommandPalette, showErrorMessage } from '@jupyterlab/apputils';
 import { PathExt } from '@jupyterlab/coreutils';
 import { IDocumentManager } from '@jupyterlab/docmanager';
 import { IDefaultFileBrowser } from '@jupyterlab/filebrowser';
+import type { Contents } from '@jupyterlab/services';
 import {
   buildIcon,
   CommandToolbarButton,
@@ -163,6 +164,74 @@ const plugin: JupyterFrontEndPlugin<IProjectContext> = {
           continue;
         }
         bound.add(document);
+        // JupyterLab 4.6 没有公开的冲突策略接口，只替换 Notebook 的冲突确认分支。
+        const conflict = document as unknown as {
+          _raiseConflict: (model: Contents.IModel, options: Partial<Contents.IModel>) => Promise<Contents.IModel>;
+        };
+        if (typeof conflict._raiseConflict === 'function' && !document.model.collaborative) {
+          const revert = document.revert.bind(document);
+          const save = document.save.bind(document);
+          let operations: Promise<void> = Promise.resolve();
+          let checking = false;
+          const serialize = (operation: () => Promise<void>): Promise<void> => {
+            const pending = operations.then(async () => {
+              if (!document.isDisposed) {
+                await operation();
+              }
+            });
+            operations = pending.catch(() => undefined);
+            return pending;
+          };
+          const reload = async (): Promise<void> => {
+            await revert();
+            if (!document.isDisposed) {
+              document.model.dirty = false;
+            }
+          };
+          conflict._raiseConflict = async model => {
+            await reload();
+            return { ...model, ...document.contentsModel };
+          };
+          document.save = () => serialize(save);
+          document.revert = () => serialize(reload);
+          const checkDisk = async (): Promise<void> => {
+            if (checking || document.isDisposed || !document.isReady || window.document.hidden) {
+              return;
+            }
+            checking = true;
+            try {
+              await serialize(async () => {
+                const path = document.path;
+                const previous = document.contentsModel;
+                if (!previous || PathExt.extname(path) !== '.ipynb') {
+                  return;
+                }
+                const latest = await app.serviceManager.contents.get(path, { content: false, hash: true });
+                if (document.isDisposed || document.path !== path || document.contentsModel !== previous) {
+                  return;
+                }
+                const changed = previous.hash != null && latest.hash != null
+                  ? previous.hash !== latest.hash
+                  : previous.last_modified !== latest.last_modified;
+                if (changed) {
+                  await reload();
+                }
+              });
+            } catch (error) {
+              console.warn('无法同步磁盘中的 Notebook', error);
+            } finally {
+              checking = false;
+            }
+          };
+          const refresh = (): void => { void checkDisk(); };
+          const timer = window.setInterval(refresh, 2000);
+          window.addEventListener('focus', refresh);
+          document.disposed.connect(() => {
+            window.clearInterval(timer);
+            window.removeEventListener('focus', refresh);
+          });
+          void document.ready.then(refresh);
+        }
         void bindProjectKernel(app, document.sessionContext, document.path).catch(error =>
           showErrorMessage('无法切换到项目 Kernel', error instanceof Error ? error : String(error))
         );

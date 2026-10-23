@@ -44,7 +44,7 @@
 
 Runtime `start_date..end_date` 为闭区间，`lookback` 只扩展内部历史，最终输出仍截回请求区间。`P90D` 是90个日历日，不保证90条交易记录，停牌、上市时间和缺行情需另查。
 
-Solo `Universe.query(start, end)` 采用结束日不含，并在内部转成 Runtime `end_date=end-1日`。`scheme.data.query` 是本地直接执行包装，不是 Runtime `execute_query` 的 alias；`codes=[]` 复用 Arena Runtime `get_codes()`，首次从 Tushare `stock_basic` 合并 `L/D/P` 股票、去重排序并在进程内缓存，需要 `TUSHARE_TOKEN`；不扫描 CoreData，不按请求日期、lookback 或 `close` 筛代码，显式 `codes` 不改且不调用 Tushare。指数池单次执行 `dataset_query`（保留 `codes=[]` 并注入 `Universe.member`），不做 `codes_query` 预选；已构造对象也可直接交给 `scheme.data.query` 执行，是否删非成员行由调用者决定。`evaluate` 返回交易日×固定证券域 BOOL 面板，无成分日为全 False，不因缺行情缩列；日期轴仍来自区间内真实 `close` 交易日。不要用过滤后的少量证券重新定义原 CS 截面。
+Universe.codes/evaluate 使用 [start,end)，普通 Query 使用闭区间。codes 在成员过滤后取历史证券并集；后续字段查询显式传候选，并通过 MEMBERS[universe.pool] 定义每日成员 BOOL。filters 删除输出行，on 只限制计算参与，二者不能混用。evaluate 保留历史成员列，非成员日 False，空成员区间保留日历和零列。普通 codes=[] 仍为 Tushare L/D/P 股票列表的全市场输入域，不是空候选。
 
 `codes=[]` 请求全市场计算域，不能作为空池“跳过查询”的方式。证券是否有数据和市场后缀支持应查当前源数据，不把 `.SH/.SZ` 与 `.XSHG/.XSHE` 混写。
 
@@ -65,7 +65,7 @@ Arena Runtime 的当前规则需要结合项目安装版本核实：
 
 1. 未知字段：读取 `factors` 全白名单及 `configuration`。对于指数权重，先确认显式 `--index-codes` 或已导出的 `INDEX_CODES` 与项目有效配置一致；`runtime-defaults` 不是项目 `.env` 的证明。未显式配置时采用 Runtime 默认目录并提示，目录中已有指数权重字段正常校验；其它指数通过非敏感参数选择，不读取 `.env`。静态字段名称错误与实际数据为空分别处理。
 2. 未知算符/参数：使用 `operators` 搜索后 `describe`，不猜参数名。
-3. 缺少成员节点：使用 `Universe.dataset_query` 的注入后对象，或对普通 Query 显式定义自己的 BOOL 条件；不要把托管字符串当到处可用。
+3. 缺少成员节点：普通 Query 显式定义 derivatives[universe.member] = MEMBERS[universe.pool]，再用于 filters 或 on；候选代码本身不会定义任何 DSL 列。
 4. 筛选后排名变化：检查完整代码域、on、lookback、上游列和数据版本，filters不提前参与排名。
 5. 末尾未来收益为空：检查评价窗口和截止日，不读取结束日后的数据去补齐。
 

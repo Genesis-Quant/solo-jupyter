@@ -1,10 +1,10 @@
 # 当前 Solo Factor 契约
 
-接口基线：Scheme 的 `base/projects/factor/{algo,params,form}.py`、`execute/factor/{api,result}.py`，以及项目factor模板；以下示例面向提供 `period/price_column/max_lag` 的新版接口。参考 Arena `backend/docs/factor/request.md` 的概念与审计规则，但不套用其请求封装。项目安装版本优先，不要求旧项目升级或改写历史报告。
+接口基线为 Scheme 1.12：base/projects/factor/{algo,params,form}.py、execute/factor/{api,result}.py 和项目模板。只使用当前接口，不回退已删除的方法，不改用户历史数据。
 
 ## 源码结构
 
-项目导出 `Factor`、`FactorParams`、`FactorAnalysisParams`、`FactorReportForm`。Params 从 `scheme.base.FactorParams` 继承 Universe，不保存 `start/end`；AnalysisParams 同时继承项目 Params 与 Scheme 分析 Params，由分析参数保存日期并传给 `compute`；表单绑定具体项目 AnalysisParams。因子输出只在 Factor 类上声明 `columns`，不在项目 AnalysisParams 重复声明、表单不提供该输入，也不传给 preprocess；Analysis 的同名字段默认为空列表，由保存/run/analyze 按类声明自动绑定为报告元数据，不需手填。以下示例使用闭区间 `[start,end]` 的新接口，旧环境不自动改写日期语义。
+项目导出 Factor、FactorParams、FactorAnalysisParams、FactorReportForm。FactorParams 保存 Universe、groups 与算法参数，不保存日期；AnalysisParams 继承项目参数并保存闭区间日期及报告设置。columns 唯一来自 Factor 类。groups 从表单进入分析参数后投影到 FactorParams，预处理与报告分组共用同一实际值。
 
 ```python
 from datetime import date, timedelta
@@ -12,7 +12,9 @@ from datetime import date, timedelta
 import pandas as pd
 from pydantic import Field
 from scheme import Factor as BaseFactor
-from scheme import DosVar, Universe
+from scheme import DosVar
+from scheme.data import query
+from scheme.data.dolphindb.universe import MEMBERS
 from scheme.base import FactorParams as BaseParams
 from scheme.base import FactorAnalysisParams as BaseAnalysis
 from scheme.base import FactorReportForm as BaseForm
@@ -44,12 +46,18 @@ class Factor(BaseFactor[FactorParams]):
                 "params": {"periods": self.params.periods},
             }
         }
-        with self.params.universe.query(
-            start, end + timedelta(days=1),
-            lookback=timedelta(days=max(90, self.params.periods * 4)),
-            derivatives=derivatives,
-            filters=[Universe.member],
-        ) as result:
+        universe = self.params.universe
+        codes = universe.codes(start, end + timedelta(days=1))
+        if not codes:
+            raise ValueError("所选区间没有股票池成员")
+        with query({
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "lookback": timedelta(days=max(90, self.params.periods * 4)),
+            "codes": codes,
+            "derivatives": {universe.member: MEMBERS[universe.pool], **derivatives},
+            "filters": [universe.member],
+        }) as result:
             return self.preprocess(
                 DosVar(result.data_ref), session=result.session,
             )
@@ -63,9 +71,9 @@ lookback启发式只提供起点，不保证停牌证券有足够记录。需要
 
 `return self.preprocess(frame)` 接收 `time/code` 加因子列的 DataFrame，也接受 `(date,symbol)` 索引面板；数据可以完全来自本地计算，不要求先执行 query。`DosVar` 必须显式传所属 `session`，如上面的查询示例。输出列取自 Factor 类唯一的 `columns` 声明，不在 preprocess、AnalysisParams 或表单重复指定，也不从临时列推断；输出统一为唯一且排序的 `(date,symbol)` 面板。
 
-预处理 DOS 在自有或借用的计算 session 中内联；暴露从另一个独立 query session 获取，不执行 `use factor`。每个交易日内按证券代码排序、逐因子裁剪至 median±3×原始MAD，使用总体标准差 `stdp` 做标准化；对标准化的对数流通市值和行业哑变量做含截距 SVD OLS，残差再标准化。默认 `market_value_column="circ_mv"`、`industry_column="industry_l0"`，动态行业来自查询，不使用旧应用的静态 Tushare 行业映射。市值小于1截为1，常量因子、常量log市值、有效样本不足或退化残差保留NULL，不假造零值。
+预处理在同一会话中查询并连接所属行业和流通市值，然后单次调用原 factor::factorPreprocess；第三个参数是 groups，必须传实际参数而不是写死数值。数值流程仍由原 factor 模块维护，不按 Python 批次拆分，不下载行业、市值再上传。
 
-preprocess 始终另开自有（owned）query，按输入日期与证券获取行业/市值暴露后 join 因子；因子原查询不预取暴露，输入已有同名列也不替代这次独立读取。独立查询负责关闭自己的 session，借用的因子 session 不关闭，不覆盖原输入变量或查询缓存；返回的是已下载 DataFrame，可以安全退出因子查询的 with。空输入及声明因子全部 NULL 明确报错。这里只处理数值、不生成分组、不在分析器重复执行；不扩大输入日期/证券域，原有行和各因子的 NULL 位置保留，分析器随后取共同有效样本。
+DosVar 必须传所属会话，处理使用局部 DOS 对象并保留外层查询和日历；不传会话的 DataFrame 处理才创建自有连接。只输出声明的数值列；函数产生的临时分组列不下载，分析根据共同有效样本与相同 groups 确定最终分组。空输入、布尔/复数和全空因子明确报错，不伪造零值。
 
 ## Notebook 运行
 
@@ -101,7 +109,7 @@ P{period}L{k}(t) = ln(price_column(t+k+period) / price_column(t+k))
 
 `params.return_columns` 按lag递增，`params.return_specs` 每项包含 `kind="log"`、`periods=period`、`lag=k`、`price_column` 和 `turnover_period=period`。收益持有期与入场延迟不混用；换手比较期用完整交易日历，不用稀疏因子观测日期。
 
-桥接校验完整 `period/price_column/max_lag` 后，直接使用报告参数的 `return_specs`，不凭参数形状强制改写收益类型。Scheme 1.10 起生成log标签，1.8/1.9的simple结果保留其实际规格。旧版仅有 `max_lag` 的对象仍生成 `r0o/r1/r1o/r2` 单段隔夜/日内规格；只有 `return_periods` 的旧对象仍输出原 `return_N` 和 `{"kind": "simple", "periods": N}` 的close-to-close累计收益规格。不把旧数据重新解释成新标签，不改旧环境或历史报告。因子实现和手写分组逻辑不因此新增预处理。
+桥接校验 period/price_column/max_lag，并直接使用 parameters.return_specs；不创建旧版参数适配或改写已有文件。
 
 ## 报告集合收益与曲线
 
@@ -128,7 +136,9 @@ P{period}L{k}(t) = ln(price_column(t+k+period) / price_column(t+k))
 
 `validate` 只在因子Notebook最后一个代码单元中显式调用，供用户手动检查；分析和报告单元在前，不因该抽样检查失败而阻断保存版本。打开表单、保存构建、正式任务及重试提交均不自动调用。参数合法性、因子类输出列、索引和实际计算错误仍正常校验；旧Schema或旧compute不符合所安装版本接口时明确报错，不静默跳过。
 
-FactorAnalysisResult字段：
+FactorAnalysisResult 是持有服务端结果和会话的对象，不是预先下载五张表的数据容器。创建和 repr 不下载；属性访问只读取对应表，preview(name,rows) 在服务器限行。with 或 close 释放会话；关闭后不再读取。save、show、to_html 是显式导出请求，按表读取，不在 analyze_factors 返回前下载。
+
+按需数据属性：
 
 - `processed_data`
 - `execution_statistics`
@@ -137,7 +147,7 @@ FactorAnalysisResult字段：
 - `group_turnover`
 - `parameters`
 
-`compute` 的返回列须与 Factor.columns 完全一致，不能夹带暴露或未声明中间列；可以返回 `(date,symbol)` 唯一 MultiIndex，也可返回 `time/code` 平表，由包装层转为同一面板。所有声明因子列必须为数值；日期不得越界。规范化代码之后重复也无效。无穷因子转换为NaN，分析器取共同有效因子样本。不得以空表/0替代报错来假造成功。
+`compute` 的返回列须与 Factor.columns 完全一致，不能夹带行业、市值或未声明中间列；可以返回 `(date,symbol)` 唯一 MultiIndex，也可返回 `time/code` 平表，由包装层转为同一面板。所有声明因子列必须为数值；日期不得越界。规范化代码之后重复也无效。无穷因子转换为NaN，分析器取共同有效因子样本。不得以空表/0替代报错来假造成功。
 
 市值加权要求有效样本具有正数 `circ_mv`；等权不需要把市值作为因子输出列。不要把因子分组变化当作真实订单换手。
 
