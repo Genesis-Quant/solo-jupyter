@@ -9,7 +9,7 @@ description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到
 
 默认服务 Solo Jupyter 研究项目。先读取项目 `pyproject.toml`、`uv.lock`、算法源码，使用该项目 `.venv/bin/python`，不要用 Jupyter Server 的全局 Python 或自动升级依赖。
 
-- **Solo 本地**：scheme.data.query 接受 Arena Runtime FactorQuery 或 JSON 字典；Universe.codes/evaluate 只提供历史候选与每日成员，普通查询显式定义 MEMBERS[universe.pool]。Solo 不使用 Arena Backend 双源码封装。
+- **Solo 本地**：scheme.data.query 接受 Scheme 扩展 FactorQuery、原 Runtime FactorQuery 或 JSON 字典；`lookforward` 是 Scheme 扩展，默认 0，额外前视只供计算，数据和日历仍裁回原输出区间；Universe.codes/evaluate 只提供历史候选与每日成员，普通查询显式定义 MEMBERS[universe.pool]。Solo 不使用 Arena Backend 双源码封装。
 - **Arena 远端**：只有用户明确操作 Arena 且当前工具确实提供对应 MCP 时，才使用双源码和 `compile_python_dsl`。见 [Arena 适配边界](references/arena-adapter.md)。
 - Skill 是本地文档和检查程序，不会凭空提供 Arena MCP，不改变运行账号权限。
 
@@ -32,7 +32,7 @@ description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到
 .venv/bin/python "$HELPER" validate request.json
 ```
 
-这些命令只读取已安装 Runtime 的模型与注册表，不连接 DolphinDB、不写数据库、不安装依赖，也不加载 `.env`。先用 `--help` 核对可选参数。Windows 项目把解释器换为 `.venv/Scripts/python.exe`。
+这些命令读取已安装 Runtime 的模型与注册表；项目 Scheme 导出扩展 FactorQuery 时，schema/validate 使用它以识别 `lookforward`，旧环境仍使用原模型并拒绝该字段。不连接 DolphinDB、不写数据库、不安装依赖，也不加载 `.env`。先用 `--help` 核对可选参数。Windows 项目把解释器换为 `.venv/Scripts/python.exe`。
 
 字段目录同时返回 `configuration`，先检查 `source`：`option` 为显式参数，`environment` 为已导出的 `INDEX_CODES`，`runtime-defaults` 只表示包的默认值，不代表项目 `.env`。未显式配置时直接使用 Runtime 默认目录并给出提示；目录中已有指数权重字段正常校验。需要选择其它指数时，取得项目已确认的非敏感配置，通过 `--index-codes` 在子命令**之前**传入（优先于环境变量），例如：
 
@@ -54,12 +54,13 @@ description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到
 
 - `DIRECT` 逐行计算且禁止 `on`；`TS` 按代码/日期；`CS` 按日期截面。
 - `on` 限定参与计算的行，未参与行产生 NULL，**不删行**。`filters` 在派生计算后按 AND 删行，只能引用顶层 BOOL 派生列。
+- filter 分两类，各自只放进对应算子的 `on`。**截面 filter** 决定当天哪些股票组成截面，用于 CS：如模板 `valid(t)` = 当日股票池成员 ∧ 当日和下一交易日非 ST、OHLC 完整 ∧ 下一交易日 `limit_status∈{0,1,4}`。它是含未来信息的研究样本筛选，CS 排名也随下一日样本域变化，不可作为当日可交易信号；不要求下一日属于 member，也不排除当日涨跌停。**时序 filter** 决定每只股票哪些观测组成序列，用于 TS，窗口和位移按 on=true 的观测计数：如 `is_week_end` 取周采样，计算按周 resample 的近 5 周波动率。截面 filter 不放进 TS 的 `on`，否则涨跌停日、非成员日会从历史序列中被抽掉。例子与边界见 [DSL 规则](references/dsl-contract.md)。
 - 数值字段不是 BOOL。对价格、`is_st`、权重先使用比较或类型明确的 BOOL 算符。
 - JSON 中字符串可以引用基础列或命名派生列；Arena Python 源码对本地派生列必须引用 OP 变量。
-- Solo 的 Universe.member 是 stock_pool_member；Universe 的内部成员读取已经过滤，codes 取历史并集。普通 query 不自动注入节点：显式使用 MEMBERS[universe.pool]，然后选择 filters 或 TS/CS 的 on。
+- Solo 的 Universe.member 是 stock_pool_member；Universe 的内部成员读取已经过滤，codes 取历史并集。普通 query 不自动注入节点：显式使用 MEMBERS[universe.pool]。成员是截面 filter，用于 filters 或并入 `valid` 作为 CS 的 on，不作为 TS 的 on。
 - Runtime Query 的 end_date 包含当天；Universe.codes/evaluate 和策略日期为 [start,end)，因子计算/分析为 [start,end]，因子调用 Universe 时给 end 加一天。
 - 普通 codes=[] 表示全市场输入域，复用 Tushare stock_basic 的 L/D/P 股票列表，需要 TUSHARE_TOKEN。候选为空不能据此扩大查询。evaluate 的列是区间历史成员，非成员日 False，空成员区间有日历零列；日期轴来自真实 close 记录。
-- `lookback` 是日历时长，不是交易日数；负 shift 和未来标签只能用于评价，不能作为交易信号。
+- `lookback`/`lookforward` 是非负日历时长，不是交易日数；`lookforward=0` 保持原行为。负 shift、下一日 valid 和未来标签只用于明确允许未来信息的研究评价，不能作为当日交易信号。扩展前视并不扩大 `.data` / `.calendar` 的输出区间，标签查询仍按报告原 end 截断。
 - 截面计算必须保留完整参与域。只查最终入选股票不能复现原排名或标准化结果。
 
 ## 交付

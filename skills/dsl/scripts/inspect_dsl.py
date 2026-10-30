@@ -7,7 +7,7 @@ import json
 import os
 import platform
 import sys
-from importlib import metadata
+from importlib import metadata, util
 from pathlib import Path
 from typing import Any, get_args
 
@@ -72,6 +72,12 @@ def query_models() -> tuple[Any, Any]:
         from runtime.apps.query import Derivative, FactorQuery
     except ImportError as error:
         raise dependency_error(error) from error
+    if util.find_spec("scheme") is not None:
+        try:
+            from scheme import data
+        except ImportError as error:
+            raise dependency_error(error) from error
+        FactorQuery = getattr(data, "FactorQuery", FactorQuery)
     return FactorQuery, Derivative
 
 
@@ -214,7 +220,7 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
     factor_query, derivative = query_models()
     if args.command == "schema":
         return {
-            "model": "runtime.apps.query.FactorQuery",
+            "model": f"{factor_query.__module__}.{factor_query.__name__}",
             "schema": factor_query.model_json_schema(),
             "validation": {
                 "method": "FactorQuery.model_validate",

@@ -1,11 +1,11 @@
 ---
 name: data-query
-description: 在 Solo Notebook 查询行情、财务、行业和指数成分，处理 Universe 历史候选证券、逐日成员、日期区间、lookback 或缺失数据时使用。核对项目 Runtime 和完整参与域，避免空代码列表意外查询全市场。
+description: 在 Solo Notebook 查询行情、财务、行业和指数成分，处理 Universe 历史候选证券、逐日成员、日期区间、lookback/lookforward 或缺失数据时使用。核对项目 Runtime 和完整参与域，避免空代码列表意外查询全市场。
 ---
 
 # Solo 数据查询
 
-本技能对应 Scheme 1.12 接口。先读取项目 `pyproject.toml`、`uv.lock` 与源码，以项目 `.venv/bin/python` 和实际安装包核对；版本不符时明确报错，不添加旧接口适配。`scheme.data.query` 使用 Arena Runtime 的 `FactorQuery` 校验请求，在当前 DolphinDB 会话中直接执行，不是 Arena Backend 请求，不需要 `dsl_source` 或项目 ID。
+本技能对应 Scheme 1.12 接口。先读取项目 `pyproject.toml`、`uv.lock` 与源码，以项目 `.venv/bin/python` 和实际安装包核对；版本不符时明确报错，不添加旧接口适配。`scheme.data.query` 使用继承 Runtime DSL 的 `scheme.data.FactorQuery` 校验请求，新增可选 `lookforward`；原 Runtime `FactorQuery` 对象仍可传入，默认前视为 0。先核对项目实际 schema，旧安装版本不宣称支持新字段。查询在当前 DolphinDB 会话中直接执行，不是 Arena Backend 请求，不需要 `dsl_source` 或项目 ID。
 
 ## 选择接口
 
@@ -23,9 +23,9 @@ description: 在 Solo Notebook 查询行情、财务、行业和指数成分，�
 1. 确定日期、证券域、输出列和用途。用户只要求解释时不要执行查询。
 2. 核对基础字段白名单；供应商文档不能替代项目实际字段映射。
 3. 普通 Query 的 `start_date/end_date` 为闭区间；Universe 和策略日期是 `[start,end)`；因子计算和分析为 `[start,end]`，调用 Universe 时给结束日加一天。
-4. `lookback` 是日历时长，不是交易日数；结合节假日、停牌和上市时间检查所需窗口。
+4. `lookback`/`lookforward` 是非负日历时长，不是交易日数，接受 `timedelta` 或 TimeDelta 字符串（如 `P20D`），默认均为 0。计算可读取原区间前后的数据，但 `.data`、`.calendar` 都只返回原闭区间；结合节假日检查窗口，缺数据不补值、不跳停牌。前视只用于明确允许未来信息的研究/标签，不用于当日交易信号；分析收益标签查询仍默认前视 0。
 5. Universe 先在全市场输入域上读取成员字段并应用成员过滤；只传回候选代码或成员面板，不传回全市场因子表。后续查询使用明确候选代码，不能把区间并集当作每日成员。
-6. 普通 `query` 不自动注入成员节点。需要指数成员数据时显式定义该 BOOL 派生列，再选择 `filters=[universe.member]` 或 TS/CS 节点的 `on`。filters 在派生计算后删行，on 仅限制参与计算。
+6. 普通 `query` 不自动注入成员节点。需要指数成员数据时显式定义该 BOOL 派生列，再用于 `filters=[universe.member]`，或并入截面 filter（如 `valid`）作为 CS 节点的 `on`。成员不是时序 filter，不放进 TS 的 `on`；两类 filter 见相邻 `dsl/references/dsl-contract.md`。filters 在派生计算后删行，on 仅限制参与计算。
 7. 在 `with` 内读取 `.data`、`.calendar`，或以 `result.data_ref`、`result.calendar_ref` 做服务器端运算。结果退出后不可再使用这些引用。
 8. 仅在用户要求运行时执行有界检查，核对日期、证券、NULL、历史成员变化，再按请求扩展。
 

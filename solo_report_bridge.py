@@ -1,12 +1,10 @@
 """在项目 Kernel 中将 Scheme 报告保存为文件，并通过 Solo URL iframe 展示。"""
 
 import html
-import importlib
 import json
 import math
 import os
 import re
-import sys
 from importlib.metadata import version
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -203,20 +201,5 @@ def display_report(
 
 
 def install(shell):
-    """在 Kernel 启动时设置报告桥接和日志，不修改研究包。"""
+    """在 Kernel 启动时仅设置报告桥接，保留现有日志配置。"""
     shell.solo_report_display = display_report
-    try:
-        scheme = importlib.import_module("scheme")
-    except ModuleNotFoundError as error:
-        if error.name == "scheme":
-            return
-        raise
-    logger = scheme.logger
-    logger.remove()
-    logger.add(
-        sys.stdout,
-        level="INFO",
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level:<7} | {message}",
-        backtrace=False,
-        diagnose=False,
-    )

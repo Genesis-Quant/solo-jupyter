@@ -22,7 +22,7 @@ P{period}L{k}(t) = ln(price_column(t+k+period) / price_column(t+k))
 
 `params.return_columns` 提供上述顺序；`params.return_specs` 每项包含 `kind="log"`、`periods=period`、`lag=k`、`price_column`、`turnover_period=period`。持有期不是入场延迟；换手按完整交易日历比较，不能因因子缺某一天而压缩日期轴。默认仅有 `P1L1`，需要t+1、t+2两个未来价格。
 
-新因子接口采用闭区间 `[start,end]`，行情包含end当天，但不读取end之后的未来区间。收益按完整交易日网格位移，不能在稀疏因子面板上位移，缺价或停牌不跳日期；某列所需的入场或退出端点缺价或非正时为NULL。尾部 `P5L3` 需要t+8，较早lag仍可能有效；不要将NULL填0用于IC、均值、胜率或分组收益。这些行仍可保留因子值、分组和适用的换手信息。
+新因子接口采用闭区间 `[start,end]`；报告收益标签查询默认 `lookforward=0`，行情包含end当天，但不读取end之后的未来区间。compute 中为 valid 显式前视的输入不扩展标签截止日；下一日 valid 和由其限定的 CS 排名属于含未来信息的事后研究筛选，不能视作当日可用交易信号。收益按完整交易日网格位移，不能在稀疏因子面板上位移，缺价或停牌不跳日期；某列所需的入场或退出端点缺价或非正时为NULL。尾部 `P5L3` 需要t+8，较早lag仍可能有效；不要将NULL填0用于IC、均值、胜率或分组收益。这些行仍可保留因子值、分组和适用的换手信息。
 
 历史 `r0o/r1/r1o/r2` 保持单段隔夜/日内收益口径，其中 `r0o` 从因子当日收盘起算，仅供旧报告解释，不用于新分析。旧版只含 `return_periods` 的参数和报告继续使用 `return_N(t)=C_adj(t+N)/C_adj(t)-1` 的close-to-close累计收益及原规格。桥接不将旧结果转换为新标签，不升级旧环境或篡改历史报告。
 

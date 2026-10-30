@@ -21,11 +21,13 @@ Python源码必须定义 `FACTORS` 与 `FILTERS`，使用三级路径 `DIRECT.bi
 
 ```python
 valid = DIRECT.binary.gt("valid", left="close_hfq", right=0)
-momentum = TS.unary.pct_change("momentum", col="close_hfq", periods=20, on=valid)
+momentum = TS.unary.pct_change("momentum", col="close_hfq", periods=20)
 rank = CS.unary.rank_pct("rank", col=momentum, ascending=True, ties_method="average", on=valid)
 FACTORS = []
 FILTERS = [valid]
 ```
+
+`valid` 是截面 filter，只放进 CS 的 `on`；TS 动量使用完整交易日序列。截面/时序 filter 的区分见 [DSL 规则](dsl-contract.md)。
 
 本地派生依赖必须传 OP 变量，字符串只表示基础字段。Factor/Backtest dataset 的 `stock_pool_member` 是特定编译上下文允许的外部托管例外，不能自行定义或当作任意Query已有节点。
 

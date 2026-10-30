@@ -38,15 +38,53 @@ class Factor(BaseFactor[FactorParams]):
     def compute(self, start: date, end: date) -> pd.DataFrame:
         if start > end:
             raise ValueError("因子日期区间必须满足 start <= end")
-        derivatives = {
-            "momentum": {
-                "type": "TS",
-                "op": "unary.pct_change",
-                "fields": {"col": "close_hfq"},
-                "params": {"periods": self.params.periods},
-            }
-        }
         universe = self.params.universe
+        derivatives = {
+            "valid": {
+                "type": "DIRECT",
+                "op": "multiary.and",
+                "fields": {"cols": [
+                    universe.member,
+                    *(
+                        {"type": "DIRECT", "op": "binary.eq", "fields": {
+                            "left": "is_st" if periods == 0 else {
+                                "type": "TS", "op": "unary.shift", "fields": {"col": "is_st"},
+                                "params": {"periods": periods},
+                            }, "right": 0,
+                        }} for periods in (0, -1)
+                    ),
+                    *(
+                        {"type": "DIRECT", "op": "unary.not_null", "fields": {
+                            "col": price if periods == 0 else {
+                                "type": "TS", "op": "unary.shift", "fields": {"col": price},
+                                "params": {"periods": periods},
+                            },
+                        }} for periods in (0, -1) for price in ("open", "high", "low", "close")
+                    ),
+                    {
+                        "type": "DIRECT",
+                        "op": "unary.isin",
+                        "fields": {"col": {
+                            "type": "TS", "op": "unary.shift", "fields": {"col": "limit_status"},
+                            "params": {"periods": -1},
+                        }},
+                        "params": {"values": [0, 1, 4]},
+                    },
+                ]},
+            },
+            "momentum": {
+                "type": "CS",
+                "op": "unary.rank_pct",
+                "fields": {"col": {
+                    "type": "TS",
+                    "op": "unary.pct_change",
+                    "fields": {"col": "close_hfq"},
+                    "params": {"periods": self.params.periods},
+                }},
+                "params": {"ascending": True, "ties_method": "average"},
+                "on": "valid",
+            },
+        }
         codes = universe.codes(start, end + timedelta(days=1))
         if not codes:
             raise ValueError("所选区间没有股票池成员")
@@ -54,16 +92,19 @@ class Factor(BaseFactor[FactorParams]):
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
             "lookback": timedelta(days=max(90, self.params.periods * 4)),
+            "lookforward": timedelta(days=20),
             "codes": codes,
             "derivatives": {universe.member: MEMBERS[universe.pool], **derivatives},
-            "filters": [universe.member],
+            "filters": ["valid"],
         }) as result:
             return self.preprocess(
                 DosVar(result.data_ref), session=result.session,
             )
 ```
 
-使用前核对当前 `close_hfq` 与 `unary.pct_change` 定义。示例只对输出应用成员filter，动量的历史输入不限制为成员日；是否应在成员子序列上计算是独立业务决定，不能随意添加 `on`。
+使用前核对当前 `close_hfq`、`limit_status` 与各算符定义。`valid` 是截面 filter：当日属于 member，t 与下一交易日 t+1 均非 ST、OHLC 完整，t+1 的 `limit_status∈{0,1,4}`；不要求下一日为 member，也不排除当日涨跌停。`lookforward=20` 个自然日让计算端获得下一日，但结果和日历仍只输出原闭区间；窗口内无下一日、下一日停牌或字段缺失则不通过。所有 shift 都不加 on，不能跳过停牌。此条件和由它限定的 CS 排名带未来信息，只用于研究筛选，不能用作当日交易信号。它只放进 CS 排名的 `on`，并作为输出 filters；TS 动量使用完整交易日序列，不加 `on: "valid"`，否则涨跌停日、非成员日会从历史中被抽掉。截面/时序 filter 规则见相邻 `dsl/references/dsl-contract.md`。
+
+项目模板的默认因子是近 5 周波动率，同时使用两类 filter：TS 周收益和滚动标准差用时序 filter `is_week_end`（周五），`unary.ffill(limit=8)` 日频对齐，CS 排名用截面 filter `valid`。模板 `factor.py` 逐节点、逐字段注释 derivatives。
 
 lookback启发式只提供起点，不保证停牌证券有足够记录。需要完整20个有效交易日时验证样本窗口；缺失结果按明确规则保留/剔除，不能伪造值。
 
@@ -105,7 +146,7 @@ P{period}L{k}(t) = ln(price_column(t+k+period) / price_column(t+k))
 
 `lag=k>=1`，`t+k` 是交易日，不是自然日；起点最早为t+1，不允许因子当日收盘价起算隔日收益。`period=5, price_column="open_hfq", max_lag=3` 生成 `P5L1/P5L2/P5L3`，对应 t+1→t+6、t+2→t+7、t+3→t+8。默认只生成 `P1L1`，需要 t+1 与 t+2 两个未来报价。这里定义的是评价标签，不改变上文compute中的动量因子公式。
 
-行情限定在闭区间 `[start,end]`，包含end但不读取end之后的未来区间。按完整交易日网格位移，不能在稀疏因子面板上位移，停牌或缺价不跳日期；入场或退出端点缺价或非正时对应列为NULL，较早k仍可能有效，不延长读取、不补0、不删除仍有因子值的行。
+报告收益标签的行情限定在闭区间 `[start,end]`，默认 `lookforward=0`，包含end但不读取end之后的未来区间；compute 中对 valid 显式前视不扩展收益标签截止日。按完整交易日网格位移，不能在稀疏因子面板上位移，停牌或缺价不跳日期；入场或退出端点缺价或非正时对应列为NULL，较早k仍可能有效，不延长读取、不补0、不删除仍有因子值的行。
 
 `params.return_columns` 按lag递增，`params.return_specs` 每项包含 `kind="log"`、`periods=period`、`lag=k`、`price_column` 和 `turnover_period=period`。收益持有期与入场延迟不混用；换手比较期用完整交易日历，不用稀疏因子观测日期。
 
@@ -140,7 +181,7 @@ FactorAnalysisResult 是持有服务端结果和会话的对象，不是预先�
 
 按需数据属性：
 
-- `processed_data`
+- `processed_data`：共同有效样本明细（time、code、各因子、`circ_mv`、收益标签、各因子当日分组），是 IC、分组收益和换手的计算输入。只按需从服务器读取，save/show/to_html 都不导出；全市场可达千万行，快速查看用 `preview("processed_data", rows)`。
 - `execution_statistics`
 - `information_coefficient`
 - `group_returns`

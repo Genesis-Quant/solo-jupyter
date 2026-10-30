@@ -20,6 +20,35 @@ with query(request) as result:
 
 普通请求读取闭区间，输出以 `time/code` 为轴。`factors` 只列需要输出的基础字段；派生计算所需字段会自动读取，所有顶层命名派生列都会输出，filters 只删行。先用 DSL helper 离线校验，只有用户授权实际查询时才运行。
 
+## lookback 与 lookforward：计算域不等于输出域
+
+`scheme.data.FactorQuery` 继承 Runtime 查询模型，增加 `lookforward`，默认 `timedelta(0)`；`query` 接受此模型、原 Runtime 模型或 JSON 字典。两个时长都接受非负 `timedelta` / TimeDelta 字符串，拒绝负数、bool、数值和未知字段，仍沿用 Runtime 的算符、依赖和 BOOL 校验。
+
+```python
+with query({
+    "start_date": "2026-04-30",
+    "end_date": "2026-04-30",
+    "lookback": "P110D",
+    "lookforward": "P20D",
+    "codes": ["600000.SH"],
+    "derivatives": {
+        "next_close": {
+            "type": "TS", "op": "unary.shift",
+            "fields": {"col": "close"}, "params": {"periods": -1},
+        }
+    },
+}) as result:
+    next_close = result.data
+    trading_days = result.calendar
+```
+
+- `lookback` 扩展开始日前的计算域；`lookforward` 扩展结束日后的计算域。日频边界归一到日期，内部从 `(start-lookback).normalize()` 到 `(end+lookforward).normalize()`，两端包含；返回数据和日历仍仅 `[start_date,end_date]`。不足一天的前视不会凭空多读一个自然日。
+- 先在完整扩展交易日轴上计算派生列、filters，再裁回原区间；代码列表不自动扩大。下一交易日依据真实 close 日历，`shift(-1)` 不加 on，不跳过停牌或 NULL。上例只返回 4 月 30 日，下一日价格可以来自劳动节之后；20 天是自然日窗口，不保证有 20 个交易日。
+- 窗口内缺少下一交易日、停牌或字段缺失时相应值为 NULL，不向更晚的有效交易日跳转。启用前视不会填充价格。
+- 前视取到的值和基于它的筛选都带未来信息。模板 valid 明确是事后研究筛选；即使自身波动率公式没有未来值，`CS on valid` 的排名也受未来样本域影响，不能视作当日可用信号。
+- `lookforward=0` 维持旧行为。因子分析的收益标签查询不启用前视，仍不读取报告 end 以后的标签端点；不要为了补齐标签擅自启用它。
+- `lookforward` 是 Solo Scheme 扩展，不是 Arena Runtime 或远端双源码请求已经支持的字段。离线检查脚本在项目 Scheme 导出扩展模型时使用它；旧项目按安装版本拒绝该字段，不自动升级。
+
 ## 历史候选与每日成员
 
 ```python
