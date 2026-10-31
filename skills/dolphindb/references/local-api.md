@@ -9,12 +9,12 @@ import inspect
 import sys
 from importlib.metadata import version
 
-from runtime.apps.query import FactorQuery
+from query import FactorQuery
 from scheme import Universe
 from scheme.data import query
 
 print(sys.executable, sys.version.split()[0])
-for name in ("scheme", "backtest", "dolphindb", "arena-runtime"):
+for name in ("scheme", "backtest", "dolphindb", "query"):
     print(name, version(name))
 print(query.__module__, inspect.getfile(query))
 print(inspect.signature(query))
@@ -35,7 +35,7 @@ print(FactorQuery.model_json_schema())
 
 Universe 只提供候选证券与成员面板；普通因子、行情和派生字段统一调用 `query`。指数候选并集不能替代逐日成员判断：后续 Query 以 `MEMBERS[universe.pool]` 定义 `universe.member`，按业务使用 filters 或 on。完整例子见相邻 `data-query/references/query-contract.md`。
 
-普通 `codes=[]` 表示全市场输入域，通过 Arena Runtime `get_codes()` 缓存 Tushare `stock_basic` 的 L/D/P 股票，需要 `TUSHARE_TOKEN`。不能将空候选直接交给它表示无数据。显式代码不会调用 Tushare。日历取真实 close 日期，候选不是按今日成分或当日有价证券缩成的列表。
+普通 `codes=[]` 表示全市场输入域，通过 Query `get_codes()` 缓存 Tushare `stock_basic` 的 L/D/P 股票，需要 `TUSHARE_TOKEN`。不能将空候选直接交给它表示无数据。显式代码不会调用 Tushare。日历取真实 close 日期，候选不是按今日成分或当日有价证券缩成的列表。
 
 `result.data_ref`、`result.calendar_ref` 是所属会话的引用；`.data`、`.calendar` 访问时才下载。同一会话只保留一个未关闭查询结果。借用 session 的结果退出时仅回收自己的引用；自有 session 随结果关闭。中性化在调用方 session 的局部 DOS 作用域内处理，不覆盖外层数据和日历。
 
@@ -49,7 +49,7 @@ DOLPHINDB_USERNAME=your-account
 DOLPHINDB_PASSWORD=your-password
 ```
 
-多个端点以逗号分隔，IPv6 为 `[地址]:端口`。仅在连接建立时按顺序尝试；成功后不切节点、不重放查询或委托。端点须提供同一套数据、模块和回测插件。省略显式 settings 时读取上述环境，不映射旧名称；不打印凭据。
+多个端点以逗号分隔，IPv6 为 `[地址]:端口`。仅在连接建立时按顺序尝试；成功后不切节点、不重放查询或委托。端点须提供同一套数据和回测插件；Query 的 DOS 在新 session 内预加载，不要求安装 query/common 模块。省略显式 settings 时读取上述环境；Query 同时支持其独立配置的旧名称；不打印凭据。
 
 ## 上传、下载与元信息
 

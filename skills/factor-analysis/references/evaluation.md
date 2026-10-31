@@ -30,7 +30,7 @@ P{period}L{k}(t) = ln(price_column(t+k+period) / price_column(t+k))
 
 ## 预处理
 
-Factor 唯一声明 columns；分组数来自 FactorParams.groups，表单和分析参数使用同一个值。compute 返回前显式调用 self.preprocess，分析器不重复预处理。DataFrame 可独立输入，DosVar 必须传原会话。原 factor::factorPreprocess 在同一 DOS 会话中连接所属行业及流通市值并处理，未传会话时才建立自有连接；局部中间对象自然回收，不下载行业、市值再上传，不覆盖调用方结果。
+Factor 唯一声明 columns；分组数来自 FactorParams.groups，表单和分析参数使用同一个值。compute 返回前显式调用 self.preprocess，分析器不重复预处理。DataFrame 可独立输入，DosVar 必须传原会话。现有脚本直接内联的 factorPreprocess（无外部 factor 模块或辅助文件）在同一 DOS 会话中连接所属行业及流通市值并处理，未传会话时才建立自有连接；局部中间对象自然回收，不下载行业、市值再上传，不覆盖调用方结果。
 
 每日截面按code排序、逐因子过滤有效输入，市值小于1截为1，对数市值用 `stdp` 标准化；原始因子做 median±3×MAD（无1.4826系数）去极值和 `stdp` 标准化；行业字符串排序后去首类构建哑变量，含截距SVD OLS；有效样本不足或残差低于浮点容限时留NULL，否则残差再标准化。默认使用动态 `industry_l0` 和 `circ_mv`，行业来源不同于旧应用静态Tushare映射，不能声称数值结果完全相同。
 

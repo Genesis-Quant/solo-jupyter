@@ -1,6 +1,6 @@
 ---
 name: dsl
-description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到派生因子、JSON DSL、DIRECT/TS/CS、滚动窗口、截面排名、on、filters、基础字段或算符参数时使用；先从当前项目 Runtime 查询准确定义，不凭名称猜接口。
+description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到派生因子、JSON DSL、DIRECT/TS/CS、滚动窗口、截面排名、on、filters、基础字段或算符参数时使用；先从当前项目 Query 包查询准确定义，不凭名称猜接口。
 ---
 
 # Factor Query DSL
@@ -9,7 +9,7 @@ description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到
 
 默认服务 Solo Jupyter 研究项目。先读取项目 `pyproject.toml`、`uv.lock`、算法源码，使用该项目 `.venv/bin/python`，不要用 Jupyter Server 的全局 Python 或自动升级依赖。
 
-- **Solo 本地**：scheme.data.query 接受 Scheme 扩展 FactorQuery、原 Runtime FactorQuery 或 JSON 字典；`lookforward` 是 Scheme 扩展，默认 0，额外前视只供计算，数据和日历仍裁回原输出区间；Universe.codes/evaluate 只提供历史候选与每日成员，普通查询显式定义 MEMBERS[universe.pool]。Solo 不使用 Arena Backend 双源码封装。
+- **Solo 本地**：scheme.data.query 委托独立 query 包，接受 query.FactorQuery 或 JSON 字典；`lookforward` 由 Query 原生支持，默认 0，额外前视只供计算，数据和日历仍裁回原输出区间；新 session 预加载本地编译的 DOS，不执行 use query；Universe.codes/evaluate 只提供历史候选与每日成员，普通查询显式定义 MEMBERS[universe.pool]。Solo 不使用 Arena Backend 双源码封装。
 - **Arena 远端**：只有用户明确操作 Arena 且当前工具确实提供对应 MCP 时，才使用双源码和 `compile_python_dsl`。见 [Arena 适配边界](references/arena-adapter.md)。
 - Skill 是本地文档和检查程序，不会凭空提供 Arena MCP，不改变运行账号权限。
 
@@ -32,22 +32,22 @@ description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到
 .venv/bin/python "$HELPER" validate request.json
 ```
 
-这些命令读取已安装 Runtime 的模型与注册表；项目 Scheme 导出扩展 FactorQuery 时，schema/validate 使用它以识别 `lookforward`，旧环境仍使用原模型并拒绝该字段。不连接 DolphinDB、不写数据库、不安装依赖，也不加载 `.env`。先用 `--help` 核对可选参数。Windows 项目把解释器换为 `.venv/Scripts/python.exe`。
+这些命令读取已安装 Query 的模型与注册表，包含原生 `lookforward`；不导入 Scheme，不回退到 Arena Query。不连接 DolphinDB、不写数据库、不安装依赖，也不加载 `.env`。先用 `--help` 核对可选参数。Windows 项目把解释器换为 `.venv/Scripts/python.exe`。
 
-字段目录同时返回 `configuration`，先检查 `source`：`option` 为显式参数，`environment` 为已导出的 `INDEX_CODES`，`runtime-defaults` 只表示包的默认值，不代表项目 `.env`。未显式配置时直接使用 Runtime 默认目录并给出提示；目录中已有指数权重字段正常校验。需要选择其它指数时，取得项目已确认的非敏感配置，通过 `--index-codes` 在子命令**之前**传入（优先于环境变量），例如：
+字段目录同时返回 `configuration`，先检查 `source`：`option` 为显式参数，`environment` 为已导出的 `INDEX_CODES`，`query-defaults` 只表示包的默认值，不代表项目 `.env`。未显式配置时直接使用 Query 默认目录并给出提示；目录中已有指数权重字段正常校验。需要选择其它指数时，取得项目已确认的非敏感配置，通过 `--index-codes` 在子命令**之前**传入（优先于环境变量），例如：
 
 ```bash
 .venv/bin/python "$HELPER" --index-codes '000016.SH,000300.SH,000905.SH,000852.SH' factors
 .venv/bin/python "$HELPER" --index-codes '123456.SH' validate request.json
 ```
 
-例子不是所有项目的默认配置；不要仅为通过校验把请求中出现的指数拼进配置。不需要改变项目 `.env` 或导出密码。`factors`／`operators` 和校验结果的默认配置提示不阻止已有字段使用；默认目录不证明项目 `.env` 的有效配置，目录中不存在的字段仍返回未知字段。
+例子不是所有项目的默认配置；不要仅为通过校验把请求中出现的指数拼进配置。不需要改变项目 `.env` 或导出密码。`factors`／`operators` 和校验结果的默认配置提示不阻止已有字段使用；默认目录不证明项目 `.env` 的有效配置，Worker 目录不是自定义窄表的字段白名单；目录外字段仅提示，是否存在需核对指定表的数据。
 
 1. 明确最终需要的列、日期、代码范围、最长窗口；不要把每步中间值变成输出列。
-2. 读取基础字段白名单。字段可用不代表所有代码和日期都有非空数据。
+2. 读取 Worker 字段目录或指定窄表的实际字段。字段可用不代表所有代码和日期都有非空数据。
 3. 对每个不同算符取得准确 `definition`，逐项核对计算上下文、`fields`、`params`、输出类型及 `on`。不要凭函数名推断 `window`、`periods`、`ddof` 等参数。
 4. 在节点中区分列输入和参数。单消费者中间表达式优先嵌套；昂贵且被复用的表达式可以命名一次。
-5. 对完整 Runtime Query 离线校验。指数候选后的查询也须显式把 MEMBERS[universe.pool] 放入 derivatives[universe.member]；不能把未定义字符串视作已有成员节点。
+5. 对完整 Query Query 离线校验。指数候选后的查询也须显式把 MEMBERS[universe.pool] 放入 derivatives[universe.member]；不能把未定义字符串视作已有成员节点。
 6. 只有用户要求计算时才运行小范围数据验证；检查实际字段、日期边界、NULL 和样本数。离线校验通过不等于实际数据或收益有效。
 
 ## 必守语义
@@ -58,11 +58,11 @@ description: 编写、解释和检查 Solo/Arena Factor Query DSL。用户提到
 - 数值字段不是 BOOL。对价格、`is_st`、权重先使用比较或类型明确的 BOOL 算符。
 - JSON 中字符串可以引用基础列或命名派生列；Arena Python 源码对本地派生列必须引用 OP 变量。
 - Solo 的 Universe.member 是 stock_pool_member；Universe 的内部成员读取已经过滤，codes 取历史并集。普通 query 不自动注入节点：显式使用 MEMBERS[universe.pool]。成员是截面 filter，用于 filters 或并入 `valid` 作为 CS 的 on，不作为 TS 的 on。
-- Runtime Query 的 end_date 包含当天；Universe.codes/evaluate 和策略日期为 [start,end)，因子计算/分析为 [start,end]，因子调用 Universe 时给 end 加一天。
+- Query Query 的 end_date 包含当天；Universe.codes/evaluate 和策略日期为 [start,end)，因子计算/分析为 [start,end]，因子调用 Universe 时给 end 加一天。
 - 普通 codes=[] 表示全市场输入域，复用 Tushare stock_basic 的 L/D/P 股票列表，需要 TUSHARE_TOKEN。候选为空不能据此扩大查询。evaluate 的列是区间历史成员，非成员日 False，空成员区间有日历零列；日期轴来自真实 close 记录。
 - `lookback`/`lookforward` 是非负日历时长，不是交易日数；`lookforward=0` 保持原行为。负 shift、下一日 valid 和未来标签只用于明确允许未来信息的研究评价，不能作为当日交易信号。扩展前视并不扩大 `.data` / `.calendar` 的输出区间，标签查询仍按报告原 end 截断。
 - 截面计算必须保留完整参与域。只查最终入选股票不能复现原排名或标准化结果。
 
 ## 交付
 
-提供可运行的最小 DSL/项目改动，说明当前 Runtime 来源、验证方式、日期/股票池/输出列及 NULL 处理。需要数据才能确认的内容明确标注，不杜撰算符或成功结果。不要为此修改项目锁文件、已有版本或历史报告。
+提供可运行的最小 DSL/项目改动，说明当前 Query 来源、验证方式、日期/股票池/输出列及 NULL 处理。需要数据才能确认的内容明确标注，不杜撰算符或成功结果。不要为此修改项目锁文件、已有版本或历史报告。

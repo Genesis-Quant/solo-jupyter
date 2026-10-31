@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect the active project's Arena Runtime DSL without executing a query."""
+"""Inspect the active project's Query DSL without executing a query."""
 
 import argparse
 import inspect
@@ -7,12 +7,12 @@ import json
 import os
 import platform
 import sys
-from importlib import metadata, util
+from importlib import metadata
 from pathlib import Path
 from typing import Any, get_args
 
-# Set these before importing Runtime: workers import runtime.config, which otherwise
-# loads .env files. Keep INDEX_CODES and other existing non-secret configuration.
+# Inspect only the installed package and exported non-secret configuration.
+# Library imports never load .env or connect to external services.
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 sys.dont_write_bytecode = True
@@ -46,46 +46,40 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("version", help="Show the active Python and package versions.")
     commands.add_parser("schema", help="Show FactorQuery schema and validation limitations.")
-    commands.add_parser("factors", help="List the complete current Worker factor allowlist.")
+    commands.add_parser("factors", help="List factors produced by the current Workers.")
     operators = commands.add_parser("operators", help="List registered operator summaries.")
     operators.add_argument("--search", default="", help="Search operator names and descriptions.")
     operators.add_argument("--type", choices=("DIRECT", "TS", "CS"), dest="operator_type")
     describe = commands.add_parser("describe", help="Show one operator's exact schema.")
     describe.add_argument("operator")
-    validate = commands.add_parser("validate", help="Validate a Runtime FactorQuery JSON object.")
+    validate = commands.add_parser("validate", help="Validate a Query FactorQuery JSON object.")
     validate.add_argument("request", help="UTF-8 JSON file, or - to read stdin.")
     return result
 
 
 def dependency_error(error: ImportError) -> HelperError:
-    missing = getattr(error, "name", None) or "arena-runtime / pydantic"
+    missing = getattr(error, "name", None) or "query / pydantic"
     return HelperError(
         "dependency_error",
         f"Cannot load {missing!r} with {sys.executable}. "
-        "Run this helper with the current project's .venv Python containing arena-runtime; "
+        "Run this helper with the current project's .venv Python containing query; "
         "this helper does not install packages.",
     )
 
 
 def query_models() -> tuple[Any, Any]:
     try:
-        from runtime.apps.query import Derivative, FactorQuery
+        from query import Derivative, FactorQuery
     except ImportError as error:
         raise dependency_error(error) from error
-    if util.find_spec("scheme") is not None:
-        try:
-            from scheme import data
-        except ImportError as error:
-            raise dependency_error(error) from error
-        FactorQuery = getattr(data, "FactorQuery", FactorQuery)
     return FactorQuery, Derivative
 
 
 def factor_catalog(index_codes: str | None) -> tuple[tuple[str, ...], dict[str, Any]]:
     try:
-        from runtime.config import INDEX_CODES
-        from runtime.utils import index_weight_factor
-        from runtime.workers import available_factors
+        from query.config import INDEX_CODES
+        from query.utils import index_weight_factor
+        from query.workers import available_factors
     except ImportError as error:
         raise dependency_error(error) from error
 
@@ -94,7 +88,7 @@ def factor_catalog(index_codes: str | None) -> tuple[tuple[str, ...], dict[str, 
     elif "INDEX_CODES" in os.environ:
         source, value = "environment", os.environ["INDEX_CODES"]
     else:
-        source, value = "runtime-defaults", None
+        source, value = "query-defaults", None
     selected = (
         tuple(code.strip() for code in value.split(",") if code.strip())
         if value is not None else INDEX_CODES
@@ -112,9 +106,9 @@ def factor_catalog(index_codes: str | None) -> tuple[tuple[str, ...], dict[str, 
         "index_codes": list(selected),
         "dotenv_loaded": False,
     }
-    if source == "runtime-defaults":
+    if source == "query-defaults":
         configuration["warning"] = (
-            "INDEX_CODES was not supplied. This catalog uses Runtime defaults, not the project's "
+            "INDEX_CODES was not supplied. This catalog uses Query defaults, not the project's "
             ".env configuration. Default index weight factors remain valid. Use --index-codes "
             "before the command or export INDEX_CODES to select other indices; .env files are never loaded."
         )
@@ -123,11 +117,11 @@ def factor_catalog(index_codes: str | None) -> tuple[tuple[str, ...], dict[str, 
 
 def package_versions() -> dict[str, Any]:
     packages: dict[str, str | None] = {}
-    for name in ("arena-runtime", "scheme", "backtest", "pydantic"):
+    for name in ("query", "scheme", "backtest", "pydantic"):
         try:
             packages[name] = metadata.version(name)
         except metadata.PackageNotFoundError as error:
-            if name in {"arena-runtime", "pydantic"}:
+            if name in {"query", "pydantic"}:
                 raise dependency_error(error) from error
             packages[name] = None
     return {
@@ -152,7 +146,7 @@ def operator_summary(operation: str, model: Any) -> dict[str, Any]:
 def describe_operator(operation: str, operators: dict[str, Any]) -> dict[str, Any]:
     if operation not in operators:
         raise HelperError(
-            "unknown_operator", f"Unknown operator {operation!r}; use operators to list this Runtime."
+            "unknown_operator", f"Unknown operator {operation!r}; use operators to list this Query."
         )
     model = operators[operation]
     return {
@@ -178,7 +172,7 @@ def read_request(path: str) -> dict[str, Any]:
     except ValueError as error:
         raise HelperError("invalid_json", str(error)) from error
     if not isinstance(value, dict):
-        raise HelperError("invalid_json", "The request must be a Runtime FactorQuery JSON object.")
+        raise HelperError("invalid_json", "The request must be a Query FactorQuery JSON object.")
     return value
 
 
@@ -197,16 +191,12 @@ def validate_request(path: str, factor_query: Any, index_codes: str | None) -> d
     source_factors = query.source_factors()
     factors, configuration = factor_catalog(index_codes)
     unknown = sorted(set(source_factors) - set(factors))
-    if unknown:
-        raise HelperError(
-            "unknown_factors",
-            "The query references factors not declared by the selected Runtime configuration.",
-            {"unknown_factors": unknown, "configuration": configuration},
-        )
     return {
         "success": True,
         "normalized_query": query.model_dump(mode="json"),
         "source_factors": source_factors,
+        "outside_worker_catalog": unknown,
+        "note": "Worker catalogs do not restrict custom factors in the configured narrow table.",
         "configuration": configuration,
     }
 
@@ -228,8 +218,8 @@ def execute(args: argparse.Namespace) -> dict[str, Any]:
                 "note": (
                     "This JSON Schema does not enumerate concrete operator dispatch constraints. "
                     "Use FactorQuery.model_validate for fields/params, BOOL rules and dependencies; "
-                    "use describe <operator> for concrete schemas. The validate command also checks "
-                    "query.source_factors() against runtime.workers.available_factors() using Runtime "
+                    "use describe <operator> for concrete schemas. The validate command reports "
+                    "factors outside query.workers.available_factors() without rejecting custom-table fields, using Query "
                     "defaults unless --index-codes or exported INDEX_CODES is supplied. "
                     "Validation neither executes DolphinScript nor checks database contents."
                 ),
@@ -281,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     # Windows redirected streams otherwise use the locale code page, while JSON
-    # consumers and UTF-8 stdin must preserve the Runtime's Chinese descriptions.
+    # consumers and UTF-8 stdin must preserve the Query's Chinese descriptions.
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8")

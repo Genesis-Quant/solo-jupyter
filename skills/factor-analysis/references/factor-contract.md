@@ -112,7 +112,7 @@ lookback启发式只提供起点，不保证停牌证券有足够记录。需要
 
 `return self.preprocess(frame)` 接收 `time/code` 加因子列的 DataFrame，也接受 `(date,symbol)` 索引面板；数据可以完全来自本地计算，不要求先执行 query。`DosVar` 必须显式传所属 `session`，如上面的查询示例。输出列取自 Factor 类唯一的 `columns` 声明，不在 preprocess、AnalysisParams 或表单重复指定，也不从临时列推断；输出统一为唯一且排序的 `(date,symbol)` 面板。
 
-预处理在同一会话中查询并连接所属行业和流通市值，然后单次调用原 factor::factorPreprocess；第三个参数是 groups，必须传实际参数而不是写死数值。数值流程仍由原 factor 模块维护，不按 Python 批次拆分，不下载行业、市值再上传。
+预处理在同一会话中查询并连接所属行业和流通市值，然后单次调用现有 PREPROCESS_SCRIPT 字符串内联的 factorPreprocess；第三个参数是 groups，必须传实际参数而不是写死数值。原数值算法直接保留在现有脚本内，不加载外部 factor 模块，也不新建辅助模块，不按 Python 批次拆分，不下载行业、市值再上传。
 
 DosVar 必须传所属会话，处理使用局部 DOS 对象并保留外层查询和日历；不传会话的 DataFrame 处理才创建自有连接。只输出声明的数值列；函数产生的临时分组列不下载，分析根据共同有效样本与相同 groups 确定最终分组。空输入、布尔/复数和全空因子明确报错，不伪造零值。
 
