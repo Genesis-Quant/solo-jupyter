@@ -32,8 +32,8 @@ description: 在 Solo/Jupyter 中编写与诊断 DolphinDB、DolphinScript/DOS�
 
 ## 与查询 API 的关键边界
 
-- `scheme.data.query` 委托独立 `query.execute_query`，接收 Query `FactorQuery` 或字典，不使用 Arena Backend 双源码请求。新 session 预加载本地编译 DOS，不加载服务器上的 query/common 模块。`codes=[]` 复用 Query 的 `get_codes()`，首次从 Tushare `stock_basic` 合并 `L/D/P`（上市、退市、暂停上市）股票、去重排序并在进程内缓存；需要 `TUSHARE_TOKEN`，不扫描因子窄表来缩小证券域。显式 `codes` 原样保留且不调用 Tushare，导入不联网。
-- `Universe.codes(start,end)`、`evaluate(start,end)` 使用 `[start,end)`，分别返回过滤后的历史候选并集与每日成员面板。Universe 不公开通用字段查询；后续行情和因子调用普通 `query`，候选为空时不能扩大为全市场。
+- `scheme.data.query` 委托独立 `query.execute_query`，接收 Query `FactorQuery` 或字典，不使用 Arena Backend 双源码请求。调用方建连后手动调用 `query.initialize_query(session)` 注入本地编译 DOS；查询不自动初始化、检查标记或记忆会话，也不加载服务器上的 query/common 模块。`codes=[]` 复用 Query 的 `get_codes()`，首次从 Tushare `stock_basic` 合并 `L/D/P`（上市、退市、暂停上市）股票、去重排序并在进程内缓存；需要 `TUSHARE_TOKEN`，不扫描因子窄表来缩小证券域。显式 `codes` 原样保留且不调用 Tushare，导入不联网。
+- `Universe.codes(start,end, session=session)`、`evaluate(start,end, session=session)` 要求已有且由调用方显式初始化 Query 的会话，使用 `[start,end)`，分别返回过滤后的历史候选并集与每日成员面板。Universe 不公开通用字段查询；后续行情和因子调用普通 `query`，候选为空时不能扩大为全市场。
 - 普通 Query 需要显式以 `MEMBERS[universe.pool]` 定义 `universe.member`，并按业务选择 filters 或 TS/CS 的 on。evaluate 的列为区间历史成员，非成员日为 False，整个区间无成员则保留日历和零列；不是今日快照，也不是全市场固定列。
 - 数据交换使用 `upload`、`download`，不直接用 `session.run` 下载。结果按需读取，预览在 DOS 限行；函数局部变量自然回收。只使用统一 `DOLPHINDB_*` 配置，不回填旧变量。
 - DSL 元数据统一使用 `../dsl/scripts/inspect_dsl.py`，提供离线 factors/operators/describe/query validation，不联网；运行前用项目解释器查看 `--help` 核对参数，不把它当数据执行器。

@@ -1,11 +1,11 @@
 # Query 与 Universe
 
-接口基线：Scheme 1.12 的 `data/dolphindb/api.py`、`universe.py`、`database/session.py`。请求节点以项目锁定的 Arena Runtime schema 为准；Solo 的 `solo-runtime` 只负责启动冻结任务，不提供数据查询。
+接口按职责导入：`scheme.data.query` 为独立 Query 包；股票池定义在 `scheme.data.universe`，DolphinDB 会话及数据交换定义在 `scheme.data.dolphindb.database.session`。请求节点以项目实际安装的 Query schema 为准；Solo 的 `solo-runtime` 只负责启动冻结任务，不提供数据查询。
 
 ## 静态代码查询
 
 ```python
-from scheme.data import query
+from scheme.data import create_session, query
 
 request = {
     "start_date": "2024-06-03",
@@ -13,33 +13,37 @@ request = {
     "codes": ["600000.SH", "000001.SZ"],
     "factors": ["close", "adj_factor"],
 }
-with query(request) as result:
-    prices = result.data
-    trading_days = result.calendar
+with create_session() as session:
+    query.initialize_query(session)
+    with query.execute_query(request, session=session) as result:
+        prices = result.data
+        trading_days = result.calendar
 ```
 
 普通请求读取闭区间，输出以 `time/code` 为轴。`factors` 只列需要输出的基础字段；派生计算所需字段会自动读取，所有顶层命名派生列都会输出，filters 只删行。先用 DSL helper 离线校验，只有用户授权实际查询时才运行。
 
 ## lookback 与 lookforward：计算域不等于输出域
 
-`scheme.data.FactorQuery` 继承 Runtime 查询模型，增加 `lookforward`，默认 `timedelta(0)`；`query` 接受此模型、原 Runtime 模型或 JSON 字典。两个时长都接受非负 `timedelta` / TimeDelta 字符串，拒绝负数、bool、数值和未知字段，仍沿用 Runtime 的算符、依赖和 BOOL 校验。
+`query.FactorQuery` 是独立Query包的查询模型，支持 `lookforward`，默认 `timedelta(0)`；`query.execute_query` 接受此模型或请求字典。两个时长都接受非负 `timedelta` / TimeDelta 字符串，拒绝负数、bool、数值和未知字段，仍沿用 Runtime 的算符、依赖和 BOOL 校验。
 
 ```python
-with query({
-    "start_date": "2026-04-30",
-    "end_date": "2026-04-30",
-    "lookback": "P110D",
-    "lookforward": "P20D",
-    "codes": ["600000.SH"],
-    "derivatives": {
-        "next_close": {
-            "type": "TS", "op": "unary.shift",
-            "fields": {"col": "close"}, "params": {"periods": -1},
-        }
-    },
-}) as result:
-    next_close = result.data
-    trading_days = result.calendar
+with create_session() as session:
+    query.initialize_query(session)
+    with query.execute_query({
+        "start_date": "2026-04-30",
+        "end_date": "2026-04-30",
+        "lookback": "P110D",
+        "lookforward": "P20D",
+        "codes": ["600000.SH"],
+        "derivatives": {
+            "next_close": {
+                "type": "TS", "op": "unary.shift",
+                "fields": {"col": "close"}, "params": {"periods": -1},
+            }
+        },
+    }, session=session) as result:
+        next_close = result.data
+        trading_days = result.calendar
 ```
 
 - `lookback` 扩展开始日前的计算域；`lookforward` 扩展结束日后的计算域。日频边界归一到日期，内部从 `(start-lookback).normalize()` 到 `(end+lookforward).normalize()`，两端包含；返回数据和日历仍仅 `[start_date,end_date]`。不足一天的前视不会凭空多读一个自然日。
@@ -54,25 +58,25 @@ with query({
 ```python
 from datetime import date, timedelta
 
-from scheme import StockPool, Universe
-from scheme.data import query
-from scheme.data.dolphindb.universe import MEMBERS
+from scheme.data import MEMBERS, StockPool, Universe, create_session, query
 
 universe = Universe(pool=StockPool.CSI300)
 start, end = date(2024, 6, 3), date(2024, 6, 8)
-codes = universe.codes(start, end)
-if not codes:
-    raise ValueError("所选区间没有股票池成员")
-with query({
-    "start_date": start.isoformat(),
-    "end_date": (end - timedelta(days=1)).isoformat(),
-    "lookback": "P90D",
-    "codes": codes,
-    "factors": ["close", "adj_factor"],
-    "derivatives": {universe.member: MEMBERS[universe.pool]},
-    "filters": [universe.member],
-}) as result:
-    member_prices = result.data
+with create_session() as session:
+    query.initialize_query(session)
+    codes = universe.codes(start, end, session=session)
+    if not codes:
+        raise ValueError("所选区间没有股票池成员")
+    with query.execute_query({
+        "start_date": start.isoformat(),
+        "end_date": (end - timedelta(days=1)).isoformat(),
+        "lookback": "P90D",
+        "codes": codes,
+        "factors": ["close", "adj_factor"],
+        "derivatives": {universe.member: MEMBERS[universe.pool]},
+        "filters": [universe.member],
+    }, session=session) as result:
+        member_prices = result.data
 ```
 
 - `codes(start,end)` 已应用每日成员过滤，再对结果取代码并集；不是把全市场输入代码直接返回。只传回候选列表，后续因子查询使用该列表。
@@ -84,23 +88,24 @@ with query({
 
 ## 会话、数据与日历
 
-`query(request, *, session=None, settings=None)` 返回 `QueryResult`。数据与日历各有按需下载属性 `.data`、`.calendar`，服务器引用为 `.data_ref`、`.calendar_ref`；没有源表、计算中间表等额外下载接口。
+`query.execute_query(request, *, session, settings=...)`强制使用已有会话并返回`QueryResult`，不创建或关闭连接。Scheme研究代码通过`scheme.data.dolphindb`管理会话；独立使用Query时也可传入DolphinDB SDK会话，不要求安装Scheme。独立`query workers`命令使用自己的`WorkerSettings`在CLI边界建连，再把连接注入Worker；这不是查询API的隐式会话工厂。`from scheme.data import query` 导入实际Query包，不是函数；执行入口仅为 `execute_query`。数据与日历有按需下载属性 `.data`、`.calendar`；还可读取 `.source_data`、`.computed_data`、`.filtered_data`，对应引用为 `.source_ref`、`.computed_ref`、`.filtered_ref`、`.data_ref`、`.calendar_ref`。
 
 ```python
-from scheme.data import query
-from scheme.data.dolphindb.database import download
+from scheme.data import create_session, download, query
 
-with query(request) as result:
-    preview = download(
-        result.session,
-        f"select top 5 time, code from {result.data_ref}",
-        "查询键预览",
-    )
+with create_session() as session:
+    query.initialize_query(session)
+    with query.execute_query(request, session=session) as result:
+        preview = download(
+            session,
+            f"select top 5 time, code from {result.data_ref}",
+            "查询键预览",
+        )
 ```
 
 `.data` 会下载全部最终结果，`.head()` 在其后执行不能限制网络或内存。查询本身先限制日期、代码和列，预览再使用有界服务器投影。
 
-省略 session 时结果拥有连接，退出时关闭；传入 session 时退出只回收本次结果引用，不关闭调用方连接。同一会话的存活查询结果不能重叠。需要在该结果内执行因子预处理时，传同一 session；预处理使用局部 DOS 对象，不覆盖外层结果及日历。结果关闭后不能继续下载或使用引用。
+结果支持直接`with`或显式`.close()`，不使用`closing`。Scheme的`create_session()`返回支持`with`和`.close()`的会话，包含可选`max_time`总寿命限制；它不加载Query脚本。调用方手动调用`query.initialize_query(session)`后再查询；Query、Universe和预处理不自动初始化、不检查指纹或记忆会话，显式重复初始化会再次执行DOS。Query禁止省略或传入空session，正常、失败及结果退出都不关闭调用方连接，只回收本次结果引用。会话由外层Scheme上下文回收。同一会话的存活查询结果不能重叠。需要在该结果内执行因子预处理时，传同一 session；预处理使用局部 DOS 对象，不覆盖外层结果及日历。结果关闭后不能继续下载或使用引用。
 
 `upload` 只上传必要参数或本地数据；`download` 在 DOS 侧计算表达式一次，先打印类型、行列或项数，再在一次调用中返回数据，局部对象随作用域回收。禁止直接以 `session.run` 下载业务结果；只计算不传回的数据脚本以 NULL 结束。
 

@@ -71,7 +71,7 @@ class Observe(Algo[Params, C], Generic[C]):
 ```python
 from datetime import date
 from model import ModelAlgo, ModelReportForm
-from scheme import StockPool
+from scheme.data import StockPool
 
 form = ModelReportForm(
     start=date(2026, 1, 5), end=date(2026, 1, 10),
@@ -89,10 +89,10 @@ Scheme 1.12 的 Model 表单默认后续环节是 `risk_parity`、`no_control`�
 
 ## ExecutionReportForm 路径
 
-执行项目使用其自身的 `ExecutionReportForm` / `ExecutionAlgo`；表单要求 `model`、`optimize`、`control` 三个上游入口。先用 `scheme.algo_options(kind)` 列出当前环境兼容的已安装入口（形式如 `module:ModelAlgo`），按任务选择，不猜包名或自动安装。选项为空时报告缺少兼容上游，不自行替换策略。
+执行项目使用其自身的 `ExecutionReportForm` / `ExecutionAlgo`；表单要求 `model`、`optimize`、`control` 三个上游入口。先用 `scheme.execute.algo_options(kind)` 列出当前环境兼容的已安装入口（形式如 `module:ModelAlgo`），按任务选择，不猜包名或自动安装。选项为空时报告缺少兼容上游，不自行替换策略。
 
 ```python
-from scheme import algo_options
+from scheme.execute import algo_options
 from scheme.base import ExecutionReportForm
 
 # entries 是已选择的真实入口映射，不是下列代码自动选的默认值。

@@ -1,0 +1,14 @@
+Port 22
+HostKey /home/jovyan/.ssh/host_keys/ssh_host_ed25519_key
+HostKey /home/jovyan/.ssh/host_keys/ssh_host_rsa_key
+PermitRootLogin yes
+AllowUsers root
+PasswordAuthentication yes
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+UsePAM yes
+X11Forwarding no
+PrintMotd no
+Include /run/sshd/solo-environment.conf
+SetEnv HOME=/home/jovyan PATH=/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Subsystem sftp internal-sftp

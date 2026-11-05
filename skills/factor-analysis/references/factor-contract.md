@@ -11,28 +11,23 @@ from datetime import date, timedelta
 
 import pandas as pd
 from pydantic import Field
-from scheme import Factor as BaseFactor
-from scheme import DosVar
-from scheme.data import query
-from scheme.data.dolphindb.universe import MEMBERS
-from scheme.base import FactorParams as BaseParams
-from scheme.base import FactorAnalysisParams as BaseAnalysis
-from scheme.base import FactorReportForm as BaseForm
+from scheme import base
+from scheme.data import MEMBERS, DosVar, create_session, query
 
 
-class FactorParams(BaseParams):
+class FactorParams(base.FactorParams):
     periods: int = Field(default=20, ge=1)
 
 
-class FactorAnalysisParams(FactorParams, BaseAnalysis):
+class FactorAnalysisParams(FactorParams, base.FactorAnalysisParams):
     pass
 
 
-class FactorReportForm(BaseForm[FactorAnalysisParams]):
+class FactorReportForm(base.FactorReportForm[FactorAnalysisParams]):
     pass
 
 
-class Factor(BaseFactor[FactorParams]):
+class Factor(base.Factor[FactorParams]):
     columns = ["momentum"]
 
     def compute(self, start: date, end: date) -> pd.DataFrame:
@@ -85,21 +80,21 @@ class Factor(BaseFactor[FactorParams]):
                 "on": "valid",
             },
         }
-        codes = universe.codes(start, end + timedelta(days=1))
-        if not codes:
-            raise ValueError("所选区间没有股票池成员")
-        with query({
-            "start_date": start.isoformat(),
-            "end_date": end.isoformat(),
-            "lookback": timedelta(days=max(90, self.params.periods * 4)),
-            "lookforward": timedelta(days=20),
-            "codes": codes,
-            "derivatives": {universe.member: MEMBERS[universe.pool], **derivatives},
-            "filters": ["valid"],
-        }) as result:
-            return self.preprocess(
-                DosVar(result.data_ref), session=result.session,
-            )
+        with create_session() as session:
+            query.initialize_query(session)
+            codes = universe.codes(start, end + timedelta(days=1), session=session)
+            if not codes:
+                raise ValueError("所选区间没有股票池成员")
+            with query.execute_query({
+                "start_date": start.isoformat(),
+                "end_date": end.isoformat(),
+                "lookback": timedelta(days=max(90, self.params.periods * 4)),
+                "lookforward": timedelta(days=20),
+                "codes": codes,
+                "derivatives": {universe.member: MEMBERS[universe.pool], **derivatives},
+                "filters": ["valid"],
+            }, session=session) as result:
+                return self.preprocess(DosVar(result.data_ref), session=session)
 ```
 
 使用前核对当前 `close_hfq`、`limit_status` 与各算符定义。`valid` 是截面 filter：当日属于 member，t 与下一交易日 t+1 均非 ST、OHLC 完整，t+1 的 `limit_status∈{0,1,4}`；不要求下一日为 member，也不排除当日涨跌停。`lookforward=20` 个自然日让计算端获得下一日，但结果和日历仍只输出原闭区间；窗口内无下一日、下一日停牌或字段缺失则不通过。所有 shift 都不加 on，不能跳过停牌。此条件和由它限定的 CS 排名带未来信息，只用于研究筛选，不能用作当日交易信号。它只放进 CS 排名的 `on`，并作为输出 filters；TS 动量使用完整交易日序列，不加 `on: "valid"`，否则涨跌停日、非成员日会从历史中被抽掉。截面/时序 filter 规则见相邻 `dsl/references/dsl-contract.md`。
@@ -110,16 +105,16 @@ lookback启发式只提供起点，不保证停牌证券有足够记录。需要
 
 ## 返回前预处理
 
-`return self.preprocess(frame)` 接收 `time/code` 加因子列的 DataFrame，也接受 `(date,symbol)` 索引面板；数据可以完全来自本地计算，不要求先执行 query。`DosVar` 必须显式传所属 `session`，如上面的查询示例。输出列取自 Factor 类唯一的 `columns` 声明，不在 preprocess、AnalysisParams 或表单重复指定，也不从临时列推断；输出统一为唯一且排序的 `(date,symbol)` 面板。
+`return self.preprocess(frame, session=session)` 接收 `time/code` 加因子列的 DataFrame，也接受 `(date,symbol)` 索引面板；数据可以完全来自本地计算，不要求先执行 query。两类输入都必须传入由调用方手动执行过 `query.initialize_query(session)` 的会话；`DosVar` 必须使用其所属 `session`，如上面的查询示例。输出列取自 Factor 类唯一的 `columns` 声明，不在 preprocess、AnalysisParams 或表单重复指定，也不从临时列推断；输出统一为唯一且排序的 `(date,symbol)` 面板。
 
 预处理在同一会话中查询并连接所属行业和流通市值，然后单次调用现有 PREPROCESS_SCRIPT 字符串内联的 factorPreprocess；第三个参数是 groups，必须传实际参数而不是写死数值。原数值算法直接保留在现有脚本内，不加载外部 factor 模块，也不新建辅助模块，不按 Python 批次拆分，不下载行业、市值再上传。
 
-DosVar 必须传所属会话，处理使用局部 DOS 对象并保留外层查询和日历；不传会话的 DataFrame 处理才创建自有连接。只输出声明的数值列；函数产生的临时分组列不下载，分析根据共同有效样本与相同 groups 确定最终分组。空输入、布尔/复数和全空因子明确报错，不伪造零值。
+预处理只借用传入的已初始化会话，DosVar 必须传所属会话；处理使用局部 DOS 对象并保留外层查询和日历，不创建或关闭连接，也不自动补注入 Query DOS。只输出声明的数值列；函数产生的临时分组列不下载，分析根据共同有效样本与相同 groups 确定最终分组。空输入、布尔/复数和全空因子明确报错，不伪造零值。
 
 ## Notebook 运行
 
 ```python
-from scheme import StockPool
+from scheme.data import StockPool
 
 form = FactorReportForm(
     start="2024-06-03", end="2024-06-28",
@@ -129,8 +124,11 @@ form = FactorReportForm(
     groups=5, n_select=2, weight="equal",
 )
 params = form.build()
-report = params.run(Factor)
+with params.run(Factor) as report:
+    report.show()
 ```
+
+分析和回测结果均支持直接 `with` 或显式 `close()`，不再使用 `closing`。因子分析结果退出时关闭所属会话；回测报告为本地DataFrame，不持有连接，退出不会丢弃已下载的数据。
 
 示例至少需 `period+max_lag+1` 个真实交易日才能在端点价格有效时生成最大lag的首个标签（此处为9日）；该区间扣除2024-06-10端午休市仍有19个交易日，足够按报告首日固定锚点划出3个完整 P5 日期集合（末日分别为2024-06-07、2024-06-17、2024-06-24），尾部4日不输出。完整日期集合不代表标签全部有效：受未来端点限制，集合内任一标签NULL时该集合收益仍为NULL。lookback仅补因子历史，不补研究end后的未来报价。
 

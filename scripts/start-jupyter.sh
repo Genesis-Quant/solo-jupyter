@@ -2,6 +2,14 @@
 set -euo pipefail
 
 umask 0002
+: "${JUPYTER_SSH_PASSWORD:?Set JUPYTER_SSH_PASSWORD in .env}"
+if [[ "$JUPYTER_SSH_PASSWORD" == *$'\n'* || "$JUPYTER_SSH_PASSWORD" == *$'\r'* ]]; then
+    printf '%s\n' 'JUPYTER_SSH_PASSWORD must not contain line breaks' >&2
+    exit 1
+fi
+printf 'root:%s\n' "$JUPYTER_SSH_PASSWORD" | chpasswd
+unset JUPYTER_SSH_PASSWORD
+
 seed=/opt/solo-defaults
 mkdir -p "$HOME"/{projects,runs,artifacts} "$HOME/.jupyter/kernels" "$HOME/.local/share/uv/python" "$HOME/.agents/skills"
 if [[ ! -f "$HOME/.bashrc" && -f /etc/skel/.bashrc ]]; then
@@ -33,6 +41,19 @@ for skill in "$seed/skills"/*; do
         ln -s "$skill" "$target"
     fi
 done
+
+# Keep the SSH identity across container recreation with the existing HOME volume.
+install -d -m 0755 /run/sshd
+/opt/conda/bin/python -I /usr/local/bin/configure_ssh_environment.py
+install -d -m 0700 "$HOME/.ssh" "$HOME/.ssh/host_keys"
+for type in ed25519 rsa; do
+    key="$HOME/.ssh/host_keys/ssh_host_${type}_key"
+    if [[ ! -f "$key" ]]; then
+        (umask 0077; ssh-keygen -q -t "$type" -N '' -f "$key")
+    fi
+done
+/usr/sbin/sshd -t
+/usr/sbin/sshd -D -e &
 
 cd "$HOME"
 exec start-notebook.py --ServerApp.allow_root=True --ServerApp.root_dir="$HOME" --ServerApp.default_url=/lab "$@"
